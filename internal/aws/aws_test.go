@@ -2,10 +2,13 @@ package aws
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
+	"testing/quick"
 	"time"
 
 	sm "github.com/aws/aws-sdk-go-v2/service/secretsmanager"
@@ -191,8 +194,89 @@ func TestObservedThirdPartyConflictWaitsBeforeEachRetry(t *testing.T) {
 	a := &Secrets{C: fake, jitter: func(time.Duration) time.Duration { return 0 }, wait: func(context.Context, time.Duration) error { waits++; return nil }}
 	write := provider.Write{Environment: "MY_API_KEY", Reference: provider.Reference{Container: "secret", Key: "key"}, Value: secret.New("new")}
 	_, err := a.WriteMany(context.Background(), []provider.Write{write})
-	if err == nil || fake.puts != 4 || fake.cleanups != 4 || waits != 3 {
+	var typed *provider.Error
+	if !errors.As(err, &typed) || typed.Kind != provider.Indeterminate || fake.puts != 4 || fake.cleanups != 4 || waits != 3 {
 		t.Fatalf("puts=%d cleanups=%d waits=%d err=%v", fake.puts, fake.cleanups, waits, err)
+	}
+}
+
+type interleavingSecrets struct {
+	currentVersion string
+	currentPayload string
+	candidates     map[string]string
+	promotions     int
+}
+
+func (f *interleavingSecrets) GetSecretValue(context.Context, *sm.GetSecretValueInput, ...func(*sm.Options)) (*sm.GetSecretValueOutput, error) {
+	payload, version := f.currentPayload, f.currentVersion
+	return &sm.GetSecretValueOutput{SecretString: &payload, VersionId: &version}, nil
+}
+func (*interleavingSecrets) CreateSecret(context.Context, *sm.CreateSecretInput, ...func(*sm.Options)) (*sm.CreateSecretOutput, error) {
+	return nil, errors.New("unexpected create")
+}
+func (f *interleavingSecrets) PutSecretValue(_ context.Context, in *sm.PutSecretValueInput, _ ...func(*sm.Options)) (*sm.PutSecretValueOutput, error) {
+	f.candidates[*in.ClientRequestToken] = *in.SecretString
+	return &sm.PutSecretValueOutput{VersionId: in.ClientRequestToken}, nil
+}
+func (f *interleavingSecrets) UpdateSecretVersionStage(_ context.Context, in *sm.UpdateSecretVersionStageInput, _ ...func(*sm.Options)) (*sm.UpdateSecretVersionStageOutput, error) {
+	if *in.VersionStage != "AWSCURRENT" {
+		return &sm.UpdateSecretVersionStageOutput{}, nil
+	}
+	f.promotions++
+	if f.promotions == 1 {
+		f.currentVersion = "concurrent"
+		f.currentPayload = `{"keep":"concurrent","target":"old"}`
+		return nil, errors.New("concurrent promotion")
+	}
+	f.currentVersion = *in.MoveToVersionId
+	f.currentPayload = f.candidates[f.currentVersion]
+	return &sm.UpdateSecretVersionStageOutput{}, nil
+}
+
+func TestKeyedWriteRebasesOnConcurrentSiblingUpdate(t *testing.T) {
+	fake := &interleavingSecrets{
+		currentVersion: "original",
+		currentPayload: `{"keep":"initial","target":"old"}`,
+		candidates:     map[string]string{},
+	}
+	adapter := &Secrets{C: fake, jitter: func(time.Duration) time.Duration { return 0 }, wait: func(context.Context, time.Duration) error { return nil }}
+	write := provider.Write{Environment: "TARGET", Reference: provider.Reference{Container: "secret", Key: "target"}, Value: secret.New("new")}
+
+	receipt, err := adapter.WriteMany(context.Background(), []provider.Write{write})
+	if err != nil || !reflect.DeepEqual(receipt.Completed, []string{"TARGET"}) {
+		t.Fatalf("receipt=%#v err=%v", receipt, err)
+	}
+	var final map[string]string
+	if err := json.Unmarshal([]byte(fake.currentPayload), &final); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(final, map[string]string{"keep": "concurrent", "target": "new"}) || fake.promotions != 2 {
+		t.Fatalf("final=%v promotions=%d", final, fake.promotions)
+	}
+}
+
+func TestKeyedPayloadPreservesEveryUnwrittenSibling(t *testing.T) {
+	property := func(siblings map[string]string, replacement string) bool {
+		delete(siblings, "__uno_target__")
+		existing, err := json.Marshal(siblings)
+		if err != nil {
+			return false
+		}
+		existingString := string(existing)
+		write := provider.Write{Reference: provider.Reference{Key: "__uno_target__"}, Value: secret.New(replacement)}
+		payload, err := payloadFor(&existingString, []provider.Write{write})
+		if err != nil {
+			return false
+		}
+		var got, want map[string]string
+		if json.Unmarshal(existing, &want) != nil || json.Unmarshal([]byte(payload), &got) != nil {
+			return false
+		}
+		want["__uno_target__"] = replacement
+		return reflect.DeepEqual(got, want)
+	}
+	if err := quick.Check(property, &quick.Config{MaxCount: 1_000}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -281,5 +365,22 @@ func TestSSMExactReadAndPartialSequentialWrite(t *testing.T) {
 	receipt, err := adapter.WriteMany(context.Background(), writes)
 	if err == nil || len(receipt.Completed) != 1 || receipt.Completed[0] != "A" || strings.Contains(err.Error(), "leak") {
 		t.Fatalf("receipt=%#v err=%v", receipt, err)
+	}
+}
+
+func TestSSMPartialReceiptsAreDeterministicPrefixes(t *testing.T) {
+	writes := []provider.Write{
+		{Environment: "C", Reference: provider.Reference{Container: "/c"}, Value: secret.New("c")},
+		{Environment: "A", Reference: provider.Reference{Container: "/a"}, Value: secret.New("a")},
+		{Environment: "B", Reference: provider.Reference{Container: "/b"}, Value: secret.New("b")},
+	}
+	for failure := 1; failure <= len(writes); failure++ {
+		fake := &fakeSSM{fail: failure}
+		receipt, err := (&SSM{C: fake}).WriteMany(context.Background(), append([]provider.Write(nil), writes...))
+		wantCompleted := []string{"A", "B", "C"}[:failure-1]
+		wantNames := []string{"/a", "/b", "/c"}[:failure]
+		if err == nil || !reflect.DeepEqual(receipt.Completed, wantCompleted) || !reflect.DeepEqual(fake.names, wantNames) {
+			t.Fatalf("failure=%d completed=%v names=%v err=%v", failure, receipt.Completed, fake.names, err)
+		}
 	}
 }
