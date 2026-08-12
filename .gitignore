@@ -1,0 +1,8 @@
+/node_modules/
+/dist/
+/native/
+*.tgz
+.env
+.env.*
+!.env.secrets-template
+.env.secrets

@@ -1,0 +1,61 @@
+version: '2'
+
+linters:
+  default: all
+  disable:
+    # These enforce arbitrary size/complexity budgets rather than correctness.
+    - cyclop
+    - funlen
+    - gocognit
+    - gocyclo
+    - maintidx
+    - nestif
+    # The project intentionally uses ordinary errors and compact internal APIs.
+    - err113
+    - exhaustruct
+    - ireturn
+    - noinlineerr
+    - varnamelen
+    # These are policy-specific or duplicate stronger enabled checks.
+    - depguard
+    - forbidigo
+    - funcorder
+    - goconst
+    - gomodguard
+    - inamedparam
+    - lll
+    - mnd
+    - modernize
+    - nilnil
+    - nlreturn
+    - paralleltest
+    - perfsprint
+    - recvcheck
+    - revive
+    - testpackage
+    - wrapcheck
+    - wsl
+    - wsl_v5
+
+  exclusions:
+    rules:
+      # `run` intentionally executes the exact argv supplied by the user.
+      - path: cmd/uno/main.go
+        text: 'G(204|702):'
+        linters: [gosec]
+      # The URL is synthetic parser-test data, not a credential.
+      - path: internal/core/template/template_test.go
+        text: 'G101:'
+        linters: [gosec]
+
+  settings:
+    staticcheck:
+      checks:
+        - all
+        - -QF1001
+        - -QF1003
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

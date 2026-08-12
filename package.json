@@ -1,0 +1,50 @@
+{
+  "name": "@cntryl/uno",
+  "version": "0.1.0",
+  "description": "Copy existing secrets between explicit provider references",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cntryl/uno.git"
+  },
+  "bin": {
+    "uno": "dist/cli.js"
+  },
+  "files": [
+    "dist/cli.js",
+    "native/darwin-arm64/uno",
+    "native/darwin-x64/uno",
+    "native/linux-arm64/uno",
+    "native/linux-x64/uno",
+    "native/win32-arm64/uno.exe",
+    "native/win32-x64/uno.exe",
+    "README.md",
+    "LICENSE"
+  ],
+  "type": "module",
+  "scripts": {
+    "build": "vp pack",
+    "check": "vp check",
+    "test": "vp test",
+    "check:release-versions": "vp test run test/metadata.test.ts",
+    "prepack": "vp pack"
+  },
+  "devDependencies": {
+    "@types/node": "26.2.0",
+    "vite": "npm:@voidzero-dev/vite-plus-core@0.2.9",
+    "vite-plus": "0.2.9"
+  },
+  "overrides": {
+    "vite": "npm:@voidzero-dev/vite-plus-core@0.2.9"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "npm",
+      "version": "12.0.2",
+      "onFail": "download"
+    }
+  },
+  "engines": {
+    "node": "^20.19.0 || ^22.18.0 || >=24.11.0"
+  }
+}
