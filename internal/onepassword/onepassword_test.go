@@ -161,6 +161,35 @@ func TestGroupedUpdatePreservesFieldsAndSections(t *testing.T) {
 		t.Fatalf("item=%#v receipt=%#v err=%v", fake.item, receipt, err)
 	}
 }
+
+func TestWriteRejectsNonConcealedFieldCollision(t *testing.T) {
+	fake := baseFake()
+	fake.item.Fields[1] = op.ItemField{
+		ID:        "MY_API_KEY",
+		Title:     "MY_API_KEY",
+		SectionID: stringPtr("section"),
+		FieldType: op.ItemFieldTypeText,
+		Value:     "plaintext",
+	}
+	writes := []provider.Write{{
+		Environment: "MY_API_KEY",
+		Reference:   provider.Reference{Region: "Production", Container: "service", Key: "path1/path2/MY_API_KEY"},
+		Value:       secret.New("replacement"),
+	}}
+
+	_, err := NewWithAPI(fake).WriteMany(context.Background(), writes)
+	var typed *provider.Error
+	if !errors.As(err, &typed) || typed.Kind != provider.Ambiguous {
+		t.Fatalf("err=%v", err)
+	}
+	if fake.puts != 0 {
+		t.Fatalf("puts=%d", fake.puts)
+	}
+	if len(fake.item.Fields) != 2 {
+		t.Fatalf("fields=%#v", fake.item.Fields)
+	}
+}
+
 func TestMissingItemIsNotCreated(t *testing.T) {
 	fake := baseFake()
 	fake.items = nil

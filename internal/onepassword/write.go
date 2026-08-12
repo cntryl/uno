@@ -78,6 +78,9 @@ func updateFields(item *op.Item, writes []provider.Write) error {
 		case 0:
 			item.Fields = append(item.Fields, op.ItemField{ID: field, Title: field, SectionID: sectionID, FieldType: op.ItemFieldTypeConcealed, Value: write.Value.Reveal()})
 		case 1:
+			if item.Fields[matches[0]].FieldType != op.ItemFieldTypeConcealed {
+				return &provider.Error{Kind: provider.Ambiguous}
+			}
 			item.Fields[matches[0]].Value = write.Value.Reveal()
 		default:
 			return &provider.Error{Kind: provider.Ambiguous}
@@ -89,7 +92,7 @@ func updateFields(item *op.Item, writes []provider.Write) error {
 func matchingFieldIndexes(item *op.Item, sectionID *string, field string) []int {
 	matches := make([]int, 0, 1)
 	for i, candidate := range item.Fields {
-		if (candidate.ID == field || candidate.Title == field) && candidate.FieldType == op.ItemFieldTypeConcealed && sameSection(candidate.SectionID, sectionID) {
+		if (candidate.ID == field || candidate.Title == field) && sameSection(candidate.SectionID, sectionID) {
 			matches = append(matches, i)
 		}
 	}

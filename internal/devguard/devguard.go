@@ -16,6 +16,10 @@ const secretsFile = ".env.secrets"
 // Docker both use last-match-wins semantics, so this deliberately small policy
 // cannot be undone by a later wildcard or negation rule.
 func Check(ctx context.Context, directory string) error {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		return fmt.Errorf("dev requires git on PATH")
+	}
 	info, err := os.Lstat(filepath.Join(directory, secretsFile))
 	if err == nil && info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("dev refuses a symlink at .env.secrets")
@@ -23,11 +27,11 @@ func Check(ctx context.Context, directory string) error {
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("could not inspect .env.secrets")
 	}
-	if !gitIgnored(ctx, directory, secretsFile) || !gitIgnored(ctx, directory, secretsFile+"-probe") {
+	if !gitIgnored(ctx, git, directory, secretsFile) || !gitIgnored(ctx, git, directory, secretsFile+"-probe") {
 		return fmt.Errorf("dev requires .env.secrets and .env.secrets-* to be effectively ignored by Git")
 	}
 	// #nosec G204 -- arguments are passed directly to Git without a shell.
-	tracked := exec.CommandContext(ctx, "git", "-C", directory, "ls-files", "--error-unmatch", "--", secretsFile)
+	tracked := exec.CommandContext(ctx, git, "-C", directory, "ls-files", "--error-unmatch", "--", secretsFile)
 	if tracked.Run() == nil {
 		return fmt.Errorf("dev refuses a tracked .env.secrets")
 	}
@@ -43,9 +47,9 @@ func Check(ctx context.Context, directory string) error {
 	return nil
 }
 
-func gitIgnored(ctx context.Context, directory, name string) bool {
+func gitIgnored(ctx context.Context, git, directory, name string) bool {
 	// #nosec G204 -- arguments are passed directly to Git without a shell.
-	cmd := exec.CommandContext(ctx, "git", "-C", directory, "check-ignore", "-q", "--", name)
+	cmd := exec.CommandContext(ctx, git, "-C", directory, "check-ignore", "-q", "--", name)
 	return cmd.Run() == nil
 }
 func finalRuleIgnores(path, target string) bool {

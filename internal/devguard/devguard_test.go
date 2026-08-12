@@ -46,6 +46,16 @@ func TestCheckRequiresDockerignoreForDockerfileVariants(t *testing.T) {
 	}
 }
 
+func TestCheckRequiresGitOnPath(t *testing.T) {
+	directory := t.TempDir()
+	t.Setenv("PATH", "")
+
+	err := Check(context.Background(), directory)
+	if err == nil || err.Error() != "dev requires git on PATH" {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func initGit(t *testing.T, directory string) {
 	t.Helper()
 	// #nosec G204 -- the test owns directory and no shell is used.
