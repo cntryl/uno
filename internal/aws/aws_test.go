@@ -3,8 +3,10 @@ package aws
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	sm "github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	smtypes "github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
@@ -44,6 +46,7 @@ type promotionFake struct {
 	promoteFailures          int
 	cleanupFailures          int
 	observeFailure           bool
+	thirdPartyConflict       bool
 	puts, promotes, cleanups int
 	candidate                string
 }
@@ -53,7 +56,8 @@ func (f *promotionFake) GetSecretValue(context.Context, *sm.GetSecretValueInput,
 		return nil, errors.New("observation failed")
 	}
 	payload := `{"keep":"yes"}`
-	return &sm.GetSecretValueOutput{SecretString: &payload, VersionId: &f.current}, nil
+	version := f.current
+	return &sm.GetSecretValueOutput{SecretString: &payload, VersionId: &version}, nil
 }
 
 func (f *promotionFake) CreateSecret(context.Context, *sm.CreateSecretInput, ...func(*sm.Options)) (*sm.CreateSecretOutput, error) {
@@ -68,7 +72,11 @@ func (f *promotionFake) UpdateSecretVersionStage(_ context.Context, in *sm.Updat
 	if *in.VersionStage == "AWSCURRENT" {
 		f.promotes++
 		if f.promotes <= f.promoteFailures {
-			f.current = f.candidate
+			if f.thirdPartyConflict {
+				f.current = "third-party-" + strconv.Itoa(f.promotes)
+			} else {
+				f.current = f.candidate
+			}
 			return nil, errors.New("lost response")
 		}
 		f.current = f.candidate
@@ -100,13 +108,72 @@ func TestPromotionFailureWhoseCandidateIsCurrentSucceedsAfterCleanup(t *testing.
 	}
 }
 
-func TestPendingCleanupFailureIsIndeterminate(t *testing.T) {
+func TestPendingCleanupFailureHasDistinctSafeKind(t *testing.T) {
 	fake := &promotionFake{current: "original", cleanupFailures: 1}
 	write := provider.Write{Environment: "MY_API_KEY", Reference: provider.Reference{Container: "secret", Key: "key"}, Value: secret.New("new")}
 	_, err := (&Secrets{C: fake}).WriteMany(context.Background(), []provider.Write{write})
 	var typed *provider.Error
-	if !errors.As(err, &typed) || typed.Kind != provider.Indeterminate || fake.cleanups != 1 {
+	if !errors.As(err, &typed) || typed.Kind != provider.PendingCleanupFailed || fake.cleanups != 1 {
 		t.Fatalf("cleanups=%d err=%v", fake.cleanups, err)
+	}
+}
+
+func TestAmbiguousPromotionCleanupFailureHasDistinctSafeKind(t *testing.T) {
+	fake := &promotionFake{current: "original", promoteFailures: 1, observeFailure: true, cleanupFailures: 1}
+	write := provider.Write{Environment: "MY_API_KEY", Reference: provider.Reference{Container: "secret", Key: "key"}, Value: secret.New("new")}
+	_, err := (&Secrets{C: fake}).WriteMany(context.Background(), []provider.Write{write})
+	var typed *provider.Error
+	if !errors.As(err, &typed) || typed.Kind != provider.PendingCleanupFailed || fake.cleanups != 1 {
+		t.Fatalf("cleanups=%d err=%v", fake.cleanups, err)
+	}
+}
+
+type createRaceFake struct{ attempts int }
+
+func (f *createRaceFake) GetSecretValue(context.Context, *sm.GetSecretValueInput, ...func(*sm.Options)) (*sm.GetSecretValueOutput, error) {
+	return nil, &smtypes.ResourceNotFoundException{}
+}
+func (f *createRaceFake) CreateSecret(context.Context, *sm.CreateSecretInput, ...func(*sm.Options)) (*sm.CreateSecretOutput, error) {
+	f.attempts++
+	return nil, &smtypes.ResourceExistsException{}
+}
+func (*createRaceFake) PutSecretValue(context.Context, *sm.PutSecretValueInput, ...func(*sm.Options)) (*sm.PutSecretValueOutput, error) {
+	return nil, errors.New("unexpected put")
+}
+func (*createRaceFake) UpdateSecretVersionStage(context.Context, *sm.UpdateSecretVersionStageInput, ...func(*sm.Options)) (*sm.UpdateSecretVersionStageOutput, error) {
+	return nil, errors.New("unexpected update")
+}
+
+func TestCreateRaceWaitsBeforeRetriesButNotAfterFinalAttempt(t *testing.T) {
+	fake := &createRaceFake{}
+	var delays, caps []time.Duration
+	a := &Secrets{C: fake, jitter: func(ceiling time.Duration) time.Duration { caps = append(caps, ceiling); return ceiling / 2 }, wait: func(_ context.Context, delay time.Duration) error { delays = append(delays, delay); return nil }}
+	write := provider.Write{Environment: "MY_API_KEY", Reference: provider.Reference{Container: "secret", Key: "key"}, Value: secret.New("new")}
+	_, err := a.WriteMany(context.Background(), []provider.Write{write})
+	if err == nil || fake.attempts != 4 || len(delays) != 3 || len(caps) != 3 || caps[0] != 200*time.Millisecond || caps[1] != 400*time.Millisecond || caps[2] != 800*time.Millisecond {
+		t.Fatalf("attempts=%d delays=%v caps=%v err=%v", fake.attempts, delays, caps, err)
+	}
+}
+
+func TestCreateRaceCancellationDuringBackoffIsIndeterminate(t *testing.T) {
+	fake := &createRaceFake{}
+	a := &Secrets{C: fake, jitter: func(time.Duration) time.Duration { return 0 }, wait: func(context.Context, time.Duration) error { return context.Canceled }}
+	write := provider.Write{Environment: "MY_API_KEY", Reference: provider.Reference{Container: "secret", Key: "key"}, Value: secret.New("new")}
+	_, err := a.WriteMany(context.Background(), []provider.Write{write})
+	var typed *provider.Error
+	if !errors.As(err, &typed) || typed.Kind != provider.Indeterminate || fake.attempts != 1 {
+		t.Fatalf("attempts=%d err=%v", fake.attempts, err)
+	}
+}
+
+func TestObservedThirdPartyConflictWaitsBeforeEachRetry(t *testing.T) {
+	fake := &promotionFake{current: "original", promoteFailures: 4, thirdPartyConflict: true}
+	waits := 0
+	a := &Secrets{C: fake, jitter: func(time.Duration) time.Duration { return 0 }, wait: func(context.Context, time.Duration) error { waits++; return nil }}
+	write := provider.Write{Environment: "MY_API_KEY", Reference: provider.Reference{Container: "secret", Key: "key"}, Value: secret.New("new")}
+	_, err := a.WriteMany(context.Background(), []provider.Write{write})
+	if err == nil || fake.puts != 4 || fake.cleanups != 4 || waits != 3 {
+		t.Fatalf("puts=%d cleanups=%d waits=%d err=%v", fake.puts, fake.cleanups, waits, err)
 	}
 }
 

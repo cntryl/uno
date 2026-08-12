@@ -66,6 +66,12 @@ ENV_KEY=<source reference> -> <destination reference>
 Use `--template PATH` or set `UNO_TEMPLATE` to select another file. The default
 is `.env.secrets-template` in the current working directory.
 
+Provider-sensitive operations have a 60-second deadline by default. Use
+`--timeout DURATION` with Go duration syntax (for example, `--timeout 90s` or
+`--timeout 2m`) to change it. The deadline covers all of `sync` and `dev`, and
+secret resolution for `run`. After `run` resolves its secrets, the child uses
+the original parent context and may continue beyond the provider timeout.
+
 ## Safe local development
 
 Before `uno dev` contacts a provider, `.gitignore` must effectively ignore both

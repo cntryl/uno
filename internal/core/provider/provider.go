@@ -13,13 +13,14 @@ import (
 type ErrorKind string
 
 const (
-	AccessDenied   ErrorKind = "AccessDenied"
-	Authentication ErrorKind = "Authentication"
-	Ambiguous      ErrorKind = "Ambiguous"
-	InvalidBinding ErrorKind = "InvalidBinding"
-	Indeterminate  ErrorKind = "Indeterminate"
-	InvalidState   ErrorKind = "InvalidState"
-	Other          ErrorKind = "Other"
+	AccessDenied         ErrorKind = "AccessDenied"
+	Authentication       ErrorKind = "Authentication"
+	Ambiguous            ErrorKind = "Ambiguous"
+	InvalidBinding       ErrorKind = "InvalidBinding"
+	Indeterminate        ErrorKind = "Indeterminate"
+	PendingCleanupFailed ErrorKind = "PendingCleanupFailed"
+	InvalidState         ErrorKind = "InvalidState"
+	Other                ErrorKind = "Other"
 )
 
 type Error struct{ Kind ErrorKind }

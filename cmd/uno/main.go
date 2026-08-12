@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	awsbridge "github.com/cntryl/uno/internal/aws"
 	"github.com/cntryl/uno/internal/core/engine"
@@ -26,6 +27,7 @@ const version = "0.1.0"
 type app struct {
 	templatePath string
 	registry     *provider.Registry
+	timeout      time.Duration
 }
 
 func main() {
@@ -48,6 +50,7 @@ func executeWithRegistry(ctx context.Context, args []string, providers *provider
 	global := flag.NewFlagSet("uno", flag.ContinueOnError)
 	global.SetOutput(io.Discard)
 	global.StringVar(&a.templatePath, "template", "", "secrets template path")
+	global.DurationVar(&a.timeout, "timeout", 60*time.Second, "provider operation timeout")
 	help, showVersion := false, false
 	global.BoolVar(&help, "help", false, "show help")
 	global.BoolVar(&help, "h", false, "show help")
@@ -74,6 +77,9 @@ func executeWithRegistry(ctx context.Context, args []string, providers *provider
 	}
 	if err := global.Parse(globals); err != nil {
 		return 0, cleanFlagError(err)
+	}
+	if a.timeout <= 0 {
+		return 0, fmt.Errorf("invalid arguments: timeout must be greater than zero")
 	}
 	if help || showVersion {
 		if showVersion {
@@ -110,26 +116,48 @@ func executeWithRegistry(ctx context.Context, args []string, providers *provider
 			}
 			return 0, nil
 		}
-		receipt, err := engine.Sync(ctx, plan)
+		opCtx, cancel := context.WithTimeout(ctx, a.timeout)
+		defer cancel()
+		receipt, err := engine.Sync(opCtx, plan)
 		printReceipt(receipt, err)
+		if errors.Is(opCtx.Err(), context.DeadlineExceeded) {
+			return 0, fmt.Errorf("operation timed out")
+		}
 		return 0, err
 	case "dev":
 		if len(commandArgs) != 0 {
 			return 0, fmt.Errorf("dev does not accept arguments")
 		}
-		if err := devguard.Check(ctx, "."); err != nil {
+		opCtx, cancel := context.WithTimeout(ctx, a.timeout)
+		defer cancel()
+		if err := devguard.Check(opCtx, "."); err != nil {
+			if errors.Is(opCtx.Err(), context.DeadlineExceeded) {
+				return 0, fmt.Errorf("operation timed out")
+			}
 			return 0, err
 		}
-		values, err := engine.Resolve(ctx, plan)
+		values, err := engine.Resolve(opCtx, plan)
 		if err != nil {
+			if errors.Is(opCtx.Err(), context.DeadlineExceeded) {
+				return 0, fmt.Errorf("operation timed out")
+			}
 			return 0, err
 		}
 		defer secret.DestroyMap(values)
-		if err := devguard.Check(ctx, "."); err != nil {
+		if err := devguard.Check(opCtx, "."); err != nil {
+			if errors.Is(opCtx.Err(), context.DeadlineExceeded) {
+				return 0, fmt.Errorf("operation timed out")
+			}
 			return 0, err
 		}
 		if err := dotenv.Write(".env.secrets", values); err != nil {
+			if errors.Is(opCtx.Err(), context.DeadlineExceeded) {
+				return 0, fmt.Errorf("operation timed out")
+			}
 			return 0, err
+		}
+		if errors.Is(opCtx.Err(), context.DeadlineExceeded) {
+			return 0, fmt.Errorf("operation timed out")
 		}
 		fmt.Printf("wrote .env.secrets with %d secrets\n", len(values))
 		return 0, nil
@@ -140,8 +168,13 @@ func executeWithRegistry(ctx context.Context, args []string, providers *provider
 		if len(commandArgs) == 0 {
 			return 0, fmt.Errorf("run requires a command after --")
 		}
-		values, err := engine.Resolve(ctx, plan)
+		opCtx, cancel := context.WithTimeout(ctx, a.timeout)
+		values, err := engine.Resolve(opCtx, plan)
+		cancel()
 		if err != nil {
+			if errors.Is(opCtx.Err(), context.DeadlineExceeded) {
+				return 0, fmt.Errorf("operation timed out")
+			}
 			return 0, err
 		}
 		defer secret.DestroyMap(values)
@@ -219,11 +252,11 @@ func extractGlobalFlags(args []string, run bool) ([]string, []string, error) {
 	globals, remaining := []string{}, []string{}
 	for i := 0; i < len(before); i++ {
 		arg := before[i]
-		if arg == "--help" || arg == "-h" || arg == "--version" || strings.HasPrefix(arg, "--template=") {
+		if arg == "--help" || arg == "-h" || arg == "--version" || strings.HasPrefix(arg, "--template=") || strings.HasPrefix(arg, "--timeout=") {
 			globals = append(globals, arg)
 			continue
 		}
-		if arg == "--template" {
+		if arg == "--template" || arg == "--timeout" {
 			if i+1 >= len(before) {
 				return nil, nil, fmt.Errorf("invalid arguments: flag needs an argument: %s", arg)
 			}
@@ -259,6 +292,7 @@ Commands:
 
 Options:
   --template PATH   Secrets template path [env: UNO_TEMPLATE]
+  --timeout DURATION  Provider operation timeout [default: 60s]
   --help            Print help
   --version         Print version
 `)

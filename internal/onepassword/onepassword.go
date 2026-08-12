@@ -3,7 +3,10 @@ package onepassword
 
 import (
 	"context"
+	"crypto/rand"
+	"math/big"
 	"strings"
+	"time"
 
 	op "github.com/1password/onepassword-sdk-go"
 	"github.com/cntryl/uno/internal/core/provider"
@@ -38,9 +41,44 @@ func (s sdkAPI) PutItem(c context.Context, i op.Item) (op.Item, error) { return 
 type Adapter struct {
 	lookup   LookupAPI
 	mutation MutationAPI
+	wait     func(context.Context, time.Duration) error
+	jitter   func(time.Duration) time.Duration
 }
 
 func NewWithAPI(api API) *Adapter { return &Adapter{lookup: api, mutation: api} }
+
+func (a *Adapter) waitBeforeRetry(ctx context.Context, attempt int) error {
+	ceiling := 200 * time.Millisecond * time.Duration(1<<attempt)
+	if ceiling > 2*time.Second {
+		ceiling = 2 * time.Second
+	}
+	delay := randomDelay(ceiling)
+	if a.jitter != nil {
+		delay = a.jitter(ceiling)
+	}
+	if a.wait != nil {
+		if err := a.wait(ctx, delay); err != nil {
+			return &provider.Error{Kind: provider.Indeterminate}
+		}
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return &provider.Error{Kind: provider.Indeterminate}
+	case <-timer.C:
+		return nil
+	}
+}
+
+func randomDelay(ceiling time.Duration) time.Duration {
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(ceiling)+1))
+	if err != nil {
+		return 0
+	}
+	return time.Duration(n.Int64())
+}
 func (a *Adapter) resolveVault(ctx context.Context, name string) (string, error) {
 	vaults, err := a.lookup.ListVaults(ctx)
 	if err != nil {

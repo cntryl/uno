@@ -37,6 +37,12 @@ func (a *Adapter) WriteMany(ctx context.Context, writes []provider.Write) (provi
 			if !errors.As(err, &conflict) || !conflict.VersionConflict() {
 				return provider.Receipt{}, remote()
 			}
+			if attempt == conflictRetries {
+				return provider.Receipt{}, remote()
+			}
+			if err := a.waitBeforeRetry(ctx, attempt); err != nil {
+				return provider.Receipt{}, err
+			}
 		}
 	}
 	return provider.Receipt{}, remote()

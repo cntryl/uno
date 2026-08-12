@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	op "github.com/1password/onepassword-sdk-go"
 	"github.com/cntryl/uno/internal/core/provider"
@@ -53,7 +54,10 @@ func TestWriteReloadsCurrentVersionAfterConflict(t *testing.T) {
 	fake.putFailures = 1
 	fake.typedConflicts = true
 	writes := []provider.Write{{Environment: "MY_API_KEY", Reference: provider.Reference{Region: "Production", Container: "service", Key: "path1/path2/FIELD"}, Value: secret.New("new")}}
-	if _, err := NewWithAPI(fake).WriteMany(context.Background(), writes); err != nil {
+	a := NewWithAPI(fake)
+	a.jitter = func(time.Duration) time.Duration { return 0 }
+	a.wait = func(context.Context, time.Duration) error { return nil }
+	if _, err := a.WriteMany(context.Background(), writes); err != nil {
 		t.Fatal(err)
 	}
 	if got := fake.putVersions; len(got) != 2 || got[0] != 7 || got[1] != 8 {
@@ -75,7 +79,40 @@ func TestTypedConflictAllowsThreeRetries(t *testing.T) {
 	fake.putFailures = 4
 	fake.typedConflicts = true
 	write := provider.Write{Environment: "MY_API_KEY", Reference: provider.Reference{Region: "Production", Container: "service"}, Value: secret.New("new")}
-	if _, err := NewWithAPI(fake).WriteMany(context.Background(), []provider.Write{write}); err == nil || fake.puts != 4 {
+	a := NewWithAPI(fake)
+	a.jitter = func(time.Duration) time.Duration { return 0 }
+	a.wait = func(context.Context, time.Duration) error { return nil }
+	if _, err := a.WriteMany(context.Background(), []provider.Write{write}); err == nil || fake.puts != 4 {
+		t.Fatalf("puts=%d err=%v", fake.puts, err)
+	}
+}
+
+func TestTypedConflictBackoffIsBoundedAndHasNoFinalWait(t *testing.T) {
+	fake := baseFake()
+	fake.putFailures = 4
+	fake.typedConflicts = true
+	a := NewWithAPI(fake)
+	var caps []time.Duration
+	a.jitter = func(ceiling time.Duration) time.Duration { caps = append(caps, ceiling); return ceiling }
+	a.wait = func(context.Context, time.Duration) error { return nil }
+	write := provider.Write{Environment: "MY_API_KEY", Reference: provider.Reference{Region: "Production", Container: "service"}, Value: secret.New("new")}
+	_, err := a.WriteMany(context.Background(), []provider.Write{write})
+	if err == nil || fake.puts != 4 || len(caps) != 3 || caps[0] != 200*time.Millisecond || caps[1] != 400*time.Millisecond || caps[2] != 800*time.Millisecond {
+		t.Fatalf("puts=%d caps=%v err=%v", fake.puts, caps, err)
+	}
+}
+
+func TestTypedConflictCancellationDuringBackoffIsIndeterminate(t *testing.T) {
+	fake := baseFake()
+	fake.putFailures = 4
+	fake.typedConflicts = true
+	a := NewWithAPI(fake)
+	a.jitter = func(time.Duration) time.Duration { return 0 }
+	a.wait = func(context.Context, time.Duration) error { return context.Canceled }
+	write := provider.Write{Environment: "MY_API_KEY", Reference: provider.Reference{Region: "Production", Container: "service"}, Value: secret.New("new")}
+	_, err := a.WriteMany(context.Background(), []provider.Write{write})
+	var typed *provider.Error
+	if !errors.As(err, &typed) || typed.Kind != provider.Indeterminate || fake.puts != 1 {
 		t.Fatalf("puts=%d err=%v", fake.puts, err)
 	}
 }
