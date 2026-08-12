@@ -62,26 +62,26 @@ type Factory interface {
 	Parse(string) (Reference, error)
 	Adapter(context.Context, Reference) (Adapter, error)
 }
-type capabilityFactory interface{ CapabilityVariables() []string }
+type capabilityFactory interface{ CapabilityPrefixes() []string }
 type Registry struct{ factories map[string]Factory }
 
 func NewRegistry() *Registry                          { return &Registry{factories: map[string]Factory{}} }
 func (r *Registry) Register(scheme string, f Factory) { r.factories[scheme] = f }
-func (r *Registry) CapabilityVariables() []string {
+func (r *Registry) CapabilityPrefixes() []string {
 	seen := map[string]bool{}
 	for _, factory := range r.factories {
 		if capable, ok := factory.(capabilityFactory); ok {
-			for _, key := range capable.CapabilityVariables() {
-				seen[key] = true
+			for _, prefix := range capable.CapabilityPrefixes() {
+				seen[prefix] = true
 			}
 		}
 	}
-	keys := make([]string, 0, len(seen))
-	for key := range seen {
-		keys = append(keys, key)
+	prefixes := make([]string, 0, len(seen))
+	for prefix := range seen {
+		prefixes = append(prefixes, prefix)
 	}
-	sort.Strings(keys)
-	return keys
+	sort.Strings(prefixes)
+	return prefixes
 }
 func (r *Registry) Parse(raw string) (Reference, error) {
 	i := strings.Index(raw, "://")

@@ -180,7 +180,7 @@ func executeWithRegistry(ctx context.Context, args []string, providers *provider
 		defer secret.DestroyMap(values)
 		cmd := exec.CommandContext(ctx, commandArgs[0], commandArgs[1:]...)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-		cmd.Env = safeChildEnvironment(os.Environ(), a.registry.CapabilityVariables())
+		cmd.Env = safeChildEnvironment(os.Environ(), a.registry.CapabilityPrefixes())
 		for _, key := range secret.SortedKeys(values) {
 			cmd.Env = append(cmd.Env, key+"="+values[key].Reveal())
 		}

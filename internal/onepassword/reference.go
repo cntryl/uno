@@ -11,9 +11,7 @@ import (
 
 type Factory struct{}
 
-func (Factory) CapabilityVariables() []string {
-	return []string{"OP_SERVICE_ACCOUNT_TOKEN", "OP_ACCOUNT"}
-}
+func (Factory) CapabilityPrefixes() []string { return []string{"OP_"} }
 
 func (Factory) Parse(raw string) (provider.Reference, error) { return Parse(raw) }
 
