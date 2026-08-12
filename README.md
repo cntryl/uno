@@ -89,6 +89,12 @@ dotenv file. It never writes destination providers.
 
 `uno run -- <command> [args...]` injects the resolved values only into the child
 process, preserves argv and exit status, and does not create a secrets file.
+The child can read every injected value, and same-user processes may also be
+able to inspect its environment through facilities such as
+`/proc/<pid>/environ` or `ps e`, depending on the platform and its security
+configuration. This is the standard exposure model for environment-variable
+injection; use a stronger isolation mechanism when a value must not be exposed
+that way.
 
 ## Provider references
 
