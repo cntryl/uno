@@ -43,14 +43,19 @@ type promotionFake struct {
 	current                  string
 	promoteFailures          int
 	cleanupFailures          int
+	observeFailure           bool
 	puts, promotes, cleanups int
 	candidate                string
 }
 
 func (f *promotionFake) GetSecretValue(context.Context, *sm.GetSecretValueInput, ...func(*sm.Options)) (*sm.GetSecretValueOutput, error) {
+	if f.observeFailure && f.candidate != "" {
+		return nil, errors.New("observation failed")
+	}
 	payload := `{"keep":"yes"}`
 	return &sm.GetSecretValueOutput{SecretString: &payload, VersionId: &f.current}, nil
 }
+
 func (f *promotionFake) CreateSecret(context.Context, *sm.CreateSecretInput, ...func(*sm.Options)) (*sm.CreateSecretOutput, error) {
 	return nil, errors.New("unexpected create")
 }
@@ -74,6 +79,16 @@ func (f *promotionFake) UpdateSecretVersionStage(_ context.Context, in *sm.Updat
 		return nil, errors.New("cleanup failed")
 	}
 	return &sm.UpdateSecretVersionStageOutput{}, nil
+}
+
+func TestPromotionAndObservationFailureStillAttemptsPendingCleanup(t *testing.T) {
+	fake := &promotionFake{current: "original", promoteFailures: 1, observeFailure: true}
+	write := provider.Write{Environment: "MY_API_KEY", Reference: provider.Reference{Container: "secret", Key: "key"}, Value: secret.New("new")}
+	_, err := (&Secrets{C: fake}).WriteMany(context.Background(), []provider.Write{write})
+	var typed *provider.Error
+	if !errors.As(err, &typed) || typed.Kind != provider.Indeterminate || fake.cleanups != 1 {
+		t.Fatalf("cleanups=%d err=%v", fake.cleanups, err)
+	}
 }
 
 func TestPromotionFailureWhoseCandidateIsCurrentSucceedsAfterCleanup(t *testing.T) {

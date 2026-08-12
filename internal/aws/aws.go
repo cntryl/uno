@@ -23,6 +23,8 @@ type SecretsAPI interface {
 }
 type Secrets struct{ C SecretsAPI }
 
+const maxWriteAttempts = 4
+
 func (s *Secrets) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]secret.Value, error) {
 	if len(refs) == 0 {
 		return nil, nil
@@ -72,7 +74,7 @@ func (s *Secrets) WriteMany(ctx context.Context, writes []provider.Write) (provi
 		return provider.Receipt{}, nil
 	}
 	id := writes[0].Reference.Container
-	for attempt := range 4 {
+	for attempt := range maxWriteAttempts {
 		out, getErr := s.C.GetSecretValue(ctx, &sm.GetSecretValueInput{SecretId: &id})
 		if isMissing(getErr) {
 			payload, err := payloadFor(nil, writes)
@@ -86,7 +88,7 @@ func (s *Secrets) WriteMany(ctx context.Context, writes []provider.Write) (provi
 			if !errors.As(err, &exists) {
 				return provider.Receipt{}, remoteError(err)
 			}
-			if attempt == 3 {
+			if attempt == maxWriteAttempts-1 {
 				return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
 			}
 			continue
@@ -123,6 +125,7 @@ func (s *Secrets) WriteMany(ctx context.Context, writes []provider.Write) (provi
 		}
 		current, observeErr := s.C.GetSecretValue(ctx, &sm.GetSecretValueInput{SecretId: &id})
 		if observeErr != nil || current == nil || current.VersionId == nil {
+			_ = s.removePending(ctx, id, stage, version)
 			return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
 		}
 		if err := s.removePending(ctx, id, stage, version); err != nil {
@@ -134,7 +137,7 @@ func (s *Secrets) WriteMany(ctx context.Context, writes []provider.Write) (provi
 		case *out.VersionId:
 			return provider.Receipt{}, remoteError(promoteErr)
 		default:
-			if attempt == 3 {
+			if attempt == maxWriteAttempts-1 {
 				return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
 			}
 			continue
