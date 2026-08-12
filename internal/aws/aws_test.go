@@ -35,6 +35,25 @@ func TestParsesReferences(t *testing.T) {
 	}
 }
 
+func FuzzParseReference(f *testing.F) {
+	for _, seed := range []string{
+		"aws-secrets-manager://us-east-1/team%2Fservice/key",
+		"aws-secrets-manager-arn://arn:aws:secretsmanager:us-west-2:123456789012:secret:prod/service-Ab12Cd/key",
+		"aws-ssm://eu-west-1/full/parameter/path",
+		"aws-secrets-manager://",
+		"aws-ssm://region",
+		"aws-ssm://region/path\x00suffix",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, raw string) {
+		ref, err := Parse(raw)
+		if err == nil && (ref.Scheme == "" || ref.Region == "" || ref.Container == "") {
+			t.Fatalf("successful parse returned incomplete reference")
+		}
+	})
+}
+
 type fakeSecrets struct {
 	value         *string
 	puts, creates int

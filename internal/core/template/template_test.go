@@ -41,3 +41,29 @@ func TestErrorsNeverContainEnvironmentValues(t *testing.T) {
 		t.Fatalf("unsafe error: %v", err)
 	}
 }
+
+func FuzzParseEnv(f *testing.F) {
+	for _, seed := range []string{
+		"MY_API_KEY=op://$VAULT/item/MY_API_KEY -> aws-secrets-manager://${REGION}/item/MY_API_KEY\n",
+		"# comment\r\nKEY=source -> destination\r\n",
+		"KEY=$ -> destination",
+		"KEY=${UNCLOSED -> destination",
+		"KEY=source -> destination -> extra",
+		"KEY=source\x00 -> destination",
+	} {
+		f.Add(seed)
+	}
+	env := map[string]string{
+		"VAULT":  "Production",
+		"REGION": "us-east-1",
+	}
+	f.Fuzz(func(t *testing.T, input string) {
+		file, err := ParseEnv(input, func(key string) (string, bool) {
+			value, ok := env[key]
+			return value, ok
+		})
+		if err == nil && (file == nil || len(file.Entries) == 0) {
+			t.Fatalf("successful parse returned no entries")
+		}
+	})
+}

@@ -138,6 +138,26 @@ func TestParseNoteFieldAndDeepPath(t *testing.T) {
 		}
 	}
 }
+
+func FuzzParseReference(f *testing.F) {
+	for _, seed := range []string{
+		"op://vault/item",
+		"op://vault/item/field",
+		"op://vault/item/path1/path2/field",
+		"op://",
+		"op://vault//field",
+		"op://vault/item\x00/field",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, raw string) {
+		ref, err := Parse(raw)
+		if err == nil && (ref.Scheme != "op" || ref.Region == "" || ref.Container == "") {
+			t.Fatalf("successful parse returned incomplete reference")
+		}
+	})
+}
+
 func TestReadsNoteAndDeepConcealedField(t *testing.T) {
 	fake := baseFake()
 	a := NewWithAPI(fake)
