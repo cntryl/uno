@@ -11,12 +11,20 @@ import (
 )
 
 type fakeAPI struct {
-	vaults  []op.VaultOverview
-	items   []op.ItemOverview
-	item    op.Item
-	created op.ItemCreateParams
-	puts    int
+	vaults         []op.VaultOverview
+	items          []op.ItemOverview
+	item           op.Item
+	created        op.ItemCreateParams
+	puts           int
+	putFailures    int
+	putVersions    []uint32
+	typedConflicts bool
 }
+
+type fakeVersionConflictError struct{}
+
+func (fakeVersionConflictError) Error() string         { return "conflict" }
+func (fakeVersionConflictError) VersionConflict() bool { return true }
 
 func (f *fakeAPI) ListVaults(context.Context) ([]op.VaultOverview, error)       { return f.vaults, nil }
 func (f *fakeAPI) ListItems(context.Context, string) ([]op.ItemOverview, error) { return f.items, nil }
@@ -27,8 +35,49 @@ func (f *fakeAPI) CreateItem(_ context.Context, p op.ItemCreateParams) (op.Item,
 }
 func (f *fakeAPI) PutItem(_ context.Context, item op.Item) (op.Item, error) {
 	f.puts++
+	f.putVersions = append(f.putVersions, item.Version)
+	if f.puts <= f.putFailures {
+		f.item.Version++
+		if f.typedConflicts {
+			return op.Item{}, fakeVersionConflictError{}
+		}
+		return op.Item{}, errors.New("version conflict")
+	}
 	f.item = item
 	return item, nil
+}
+
+func TestWriteReloadsCurrentVersionAfterConflict(t *testing.T) {
+	fake := baseFake()
+	fake.item.Version = 7
+	fake.putFailures = 1
+	fake.typedConflicts = true
+	writes := []provider.Write{{Environment: "MY_API_KEY", Reference: provider.Reference{Region: "Production", Container: "service", Key: "path1/path2/FIELD"}, Value: secret.New("new")}}
+	if _, err := NewWithAPI(fake).WriteMany(context.Background(), writes); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.putVersions; len(got) != 2 || got[0] != 7 || got[1] != 8 {
+		t.Fatalf("put versions=%v", got)
+	}
+}
+
+func TestGenericWriteFailureIsNotRetried(t *testing.T) {
+	fake := baseFake()
+	fake.putFailures = 4
+	write := provider.Write{Environment: "MY_API_KEY", Reference: provider.Reference{Region: "Production", Container: "service"}, Value: secret.New("new")}
+	if _, err := NewWithAPI(fake).WriteMany(context.Background(), []provider.Write{write}); err == nil || fake.puts != 1 {
+		t.Fatalf("puts=%d err=%v", fake.puts, err)
+	}
+}
+
+func TestTypedConflictAllowsThreeRetries(t *testing.T) {
+	fake := baseFake()
+	fake.putFailures = 4
+	fake.typedConflicts = true
+	write := provider.Write{Environment: "MY_API_KEY", Reference: provider.Reference{Region: "Production", Container: "service"}, Value: secret.New("new")}
+	if _, err := NewWithAPI(fake).WriteMany(context.Background(), []provider.Write{write}); err == nil || fake.puts != 4 {
+		t.Fatalf("puts=%d err=%v", fake.puts, err)
+	}
 }
 func baseFake() *fakeAPI {
 	return &fakeAPI{
@@ -55,20 +104,22 @@ func TestParseNoteFieldAndDeepPath(t *testing.T) {
 func TestReadsNoteAndDeepConcealedField(t *testing.T) {
 	fake := baseFake()
 	a := NewWithAPI(fake)
-	note, err := a.Read(context.Background(), provider.Reference{Region: "Production", Container: "service"})
-	if err != nil || note.Reveal() != "note" {
-		t.Fatalf("note=%q err=%v", note.Reveal(), err)
+	noteRef := provider.Reference{Region: "Production", Container: "service"}
+	notes, err := a.ReadMany(context.Background(), []provider.Reference{noteRef})
+	if err != nil || notes[noteRef.Binding()].Reveal() != "note" {
+		t.Fatalf("note=%q err=%v", notes[noteRef.Binding()].Reveal(), err)
 	}
-	value, err := a.Read(context.Background(), provider.Reference{Region: "Production", Container: "service", Key: "path1/path2/FIELD"})
-	if err != nil || value.Reveal() != "old" {
-		t.Fatalf("value=%q err=%v", value.Reveal(), err)
+	fieldRef := provider.Reference{Region: "Production", Container: "service", Key: "path1/path2/FIELD"}
+	values, err := a.ReadMany(context.Background(), []provider.Reference{fieldRef})
+	if err != nil || values[fieldRef.Binding()].Reveal() != "old" {
+		t.Fatalf("value=%q err=%v", values[fieldRef.Binding()].Reveal(), err)
 	}
 }
 func TestGroupedUpdatePreservesFieldsAndSections(t *testing.T) {
 	fake := baseFake()
 	a := NewWithAPI(fake)
 	writes := []provider.Write{{Environment: "A", Reference: provider.Reference{Region: "Production", Container: "service", Key: "path1/path2/FIELD"}, Value: secret.New("new")}, {Environment: "B", Reference: provider.Reference{Region: "Production", Container: "service", Key: "new/path/SECOND"}, Value: secret.New("two")}}
-	receipt, err := a.Write(context.Background(), writes)
+	receipt, err := a.WriteMany(context.Background(), writes)
 	if err != nil || fake.puts != 1 || len(receipt.Completed) != 2 || fake.item.Fields[0].Value != "untouched" || fake.item.Fields[1].Value != "new" || len(fake.item.Sections) != 2 {
 		t.Fatalf("item=%#v receipt=%#v err=%v", fake.item, receipt, err)
 	}
@@ -77,7 +128,7 @@ func TestMissingItemIsNotCreated(t *testing.T) {
 	fake := baseFake()
 	fake.items = nil
 	a := NewWithAPI(fake)
-	_, err := a.Write(context.Background(), []provider.Write{{Environment: "K", Reference: provider.Reference{Region: "Production", Container: "new"}, Value: secret.New("body")}})
+	_, err := a.WriteMany(context.Background(), []provider.Write{{Environment: "K", Reference: provider.Reference{Region: "Production", Container: "new"}, Value: secret.New("body")}})
 	if err == nil || fake.created.Notes != nil {
 		t.Fatalf("created=%#v err=%v", fake.created, err)
 	}
@@ -85,12 +136,18 @@ func TestMissingItemIsNotCreated(t *testing.T) {
 func TestAmbiguityAndAuthenticationPrecedence(t *testing.T) {
 	fake := baseFake()
 	fake.vaults = append(fake.vaults, op.VaultOverview{ID: "v2", Title: "Production"})
-	_, err := NewWithAPI(fake).Read(context.Background(), provider.Reference{Region: "Production", Container: "service"})
+	_, err := NewWithAPI(fake).ReadMany(context.Background(), []provider.Reference{{Region: "Production", Container: "service"}})
 	var typed *provider.Error
 	if !errors.As(err, &typed) || typed.Kind != provider.Ambiguous {
 		t.Fatalf("err=%v", err)
 	}
-	if selectAuthentication("token", "account") != authServiceAccount || selectAuthentication("", "account") != authDesktop {
-		t.Fatal("authentication precedence")
+	if options, optionErr := clientOptions("token", "account"); optionErr != nil || len(options) != 1 {
+		t.Fatal("service-account authentication precedence")
+	}
+	if options, optionErr := clientOptions("", "account"); optionErr != nil || len(options) != 1 {
+		t.Fatal("desktop authentication")
+	}
+	if _, optionErr := clientOptions("", ""); optionErr == nil {
+		t.Fatal("missing authentication")
 	}
 }

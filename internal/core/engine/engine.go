@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 
 	"github.com/cntryl/uno/internal/core/provider"
 	"github.com/cntryl/uno/internal/core/secret"
@@ -52,57 +51,53 @@ func Bind(file *tpl.File, registry *provider.Registry) (*Plan, error) {
 // Resolve reads every source before returning any values. It never writes.
 func Resolve(ctx context.Context, p *Plan) (map[string]secret.Value, error) {
 	values := make(map[string]secret.Value, len(p.Mappings))
-	destroy := func() {
-		for key, value := range values {
-			value.Destroy()
-			delete(values, key)
+	defer func() {
+		if values != nil {
+			secret.DestroyMap(values)
 		}
-	}
-	adapters := map[string]provider.Adapter{}
-	type sourceGroup struct {
-		ref     provider.Reference
-		indexes []int
-	}
-	groups := map[string]*sourceGroup{}
-	keys := []string{}
-	for i, mapping := range p.Mappings {
-		key := mapping.Source.Scheme + "\x00" + mapping.Source.Region + "\x00" + mapping.Source.Container
-		if groups[key] == nil {
-			groups[key] = &sourceGroup{ref: mapping.Source}
-			keys = append(keys, key)
-		}
-		groups[key].indexes = append(groups[key].indexes, i)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		group := groups[key]
-		adapter, err := adapterFor(ctx, p.Registry, group.ref, adapters)
+	}()
+	adapters := newAdapterCache(p.Registry)
+	for _, group := range groupSources(p.Mappings) {
+		adapter, err := adapters.get(ctx, group.reference)
 		if err != nil {
-			destroy()
 			return nil, safeOperationError("read", err)
 		}
-		refs := make([]provider.Reference, len(group.indexes))
-		for i, index := range group.indexes {
-			refs[i] = p.Mappings[index].Source
+		refs := make([]provider.Reference, 0, len(group.mappings))
+		seen := make(map[string]bool)
+		for _, mapping := range group.mappings {
+			if binding := mapping.Source.Binding(); !seen[binding] {
+				seen[binding] = true
+				refs = append(refs, mapping.Source)
+			}
 		}
 		got, err := adapter.ReadMany(ctx, refs)
 		if err != nil {
-			destroy()
+			secret.DestroyMap(got)
 			return nil, safeOperationError("read", err)
 		}
-		if len(got) != len(refs) {
-			for i := range got {
-				got[i].Destroy()
+		valid := len(got) == len(refs)
+		for _, ref := range refs {
+			if _, ok := got[ref.Binding()]; !ok {
+				valid = false
 			}
-			destroy()
+		}
+		for key := range got {
+			if !seen[key] {
+				valid = false
+			}
+		}
+		if !valid {
+			secret.DestroyMap(got)
 			return nil, safeOperationError("read", &provider.Error{Kind: provider.InvalidState})
 		}
-		for i, index := range group.indexes {
-			values[p.Mappings[index].Environment] = got[i].Clone()
-			got[i].Destroy()
+		for _, mapping := range group.mappings {
+			values[mapping.Environment] = got[mapping.Source.Binding()].Clone()
 		}
+		secret.DestroyMap(got)
 	}
-	return values, nil
+	result := values
+	values = nil
+	return result, nil
 }
 
 func Sync(ctx context.Context, p *Plan) (Receipt, error) {
@@ -110,34 +105,15 @@ func Sync(ctx context.Context, p *Plan) (Receipt, error) {
 	if err != nil {
 		return Receipt{}, err
 	}
-	defer func() {
-		for key, value := range values {
-			value.Destroy()
-			delete(values, key)
-		}
-	}()
-	groups := map[string][]provider.Write{}
-	refs := map[string]provider.Reference{}
-	for _, mapping := range p.Mappings {
-		key := mapping.Destination.Scheme + "\x00" + mapping.Destination.Region + "\x00" + mapping.Destination.Container
-		groups[key] = append(groups[key], provider.Write{Environment: mapping.Environment, Reference: mapping.Destination, Value: values[mapping.Environment]})
-		refs[key] = mapping.Destination
-	}
-	keys := make([]string, 0, len(groups))
-	for key := range groups {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	defer secret.DestroyMap(values)
 	completed := []string{}
-	adapters := map[string]provider.Adapter{}
-	for _, key := range keys {
-		writes := groups[key]
-		provider.SortedWrites(writes)
-		adapter, initErr := adapterFor(ctx, p.Registry, refs[key], adapters)
+	adapters := newAdapterCache(p.Registry)
+	for _, group := range groupDestinations(p.Mappings, values) {
+		adapter, initErr := adapters.get(ctx, group.reference)
 		if initErr != nil {
 			return Receipt{}, &Error{Message: safeKind("write", initErr), Completed: completed}
 		}
-		receipt, writeErr := adapter.WriteMany(ctx, writes)
+		receipt, writeErr := adapter.WriteMany(ctx, group.writes)
 		completed = append(completed, receipt.Completed...)
 		if writeErr != nil {
 			return Receipt{}, &Error{Message: safeKind("write", writeErr), Completed: completed}
@@ -146,17 +122,6 @@ func Sync(ctx context.Context, p *Plan) (Receipt, error) {
 	return Receipt{Completed: completed}, nil
 }
 
-func adapterFor(ctx context.Context, registry *provider.Registry, ref provider.Reference, cache map[string]provider.Adapter) (provider.Adapter, error) {
-	key := ref.Scheme + "\x00" + ref.Region
-	if adapter := cache[key]; adapter != nil {
-		return adapter, nil
-	}
-	adapter, err := registry.Adapter(ctx, ref)
-	if err == nil {
-		cache[key] = adapter
-	}
-	return adapter, err
-}
 func safeOperationError(op string, err error) error {
 	return fmt.Errorf("%s failed: %s", op, kind(err))
 }

@@ -13,7 +13,7 @@ import (
 )
 
 func TestSafeChildEnvironmentStripsProviderCapabilities(t *testing.T) {
-	got := safeChildEnvironment([]string{"PATH=/bin", "AWS_REGION=us-east-1", "AWS_PROFILE=admin", "AWS_SECRET_ACCESS_KEY=secret", "OP_SERVICE_ACCOUNT_TOKEN=token", "ORDINARY=value"})
+	got := safeChildEnvironment([]string{"PATH=/bin", "AWS_REGION=us-east-1", "AWS_PROFILE=admin", "AWS_SECRET_ACCESS_KEY=secret", "OP_SERVICE_ACCOUNT_TOKEN=token", "ORDINARY=value"}, registry().CapabilityVariables())
 	joined := strings.Join(got, "\n")
 	if !strings.Contains(joined, "PATH=/bin") || !strings.Contains(joined, "AWS_REGION=us-east-1") || !strings.Contains(joined, "ORDINARY=value") || strings.Contains(joined, "AWS_PROFILE") || strings.Contains(joined, "secret") || strings.Contains(joined, "token") {
 		t.Fatalf("unsafe child environment: %v", got)
@@ -35,23 +35,15 @@ type cliAdapter struct {
 	value                   string
 }
 
-//nolint:unparam // The signature mirrors the provider contract used by the test adapter.
-func (a *cliAdapter) Read(context.Context, provider.Reference) (secret.Value, error) {
-	a.reads++
-	value := a.value
-	if value == "" {
-		value = "resolved"
-	}
-	return secret.New(value), nil
-}
-func (a *cliAdapter) ReadMany(ctx context.Context, refs []provider.Reference) ([]secret.Value, error) {
-	out := make([]secret.Value, 0, len(refs))
+func (a *cliAdapter) ReadMany(_ context.Context, refs []provider.Reference) (map[string]secret.Value, error) {
+	out := make(map[string]secret.Value, len(refs))
 	for _, r := range refs {
-		v, e := a.Read(ctx, r)
-		if e != nil {
-			return nil, e
+		a.reads++
+		value := a.value
+		if value == "" {
+			value = "resolved"
 		}
-		out = append(out, v)
+		out[r.Binding()] = secret.New(value)
 	}
 	return out, nil
 }

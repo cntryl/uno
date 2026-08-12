@@ -7,83 +7,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"net/url"
-	"regexp"
-	"sort"
-	"strings"
 
-	awscfg "github.com/aws/aws-sdk-go-v2/config"
 	sm "github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	smtypes "github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
-	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/cntryl/uno/internal/core/provider"
 	"github.com/cntryl/uno/internal/core/secret"
 )
-
-type Factory struct{}
-
-func (Factory) Parse(raw string) (provider.Reference, error) { return Parse(raw) }
-func (Factory) Adapter(ctx context.Context, ref provider.Reference) (provider.Adapter, error) {
-	return New(ctx, ref)
-}
-
-var completeSecretARN = regexp.MustCompile(`^(arn:[^:]+:secretsmanager:([^:]+):[0-9]{12}:secret:.+-[A-Za-z0-9]{6})(?:/([^/]+))?$`)
-
-func Parse(raw string) (provider.Reference, error) {
-	if strings.ContainsRune(raw, 0) {
-		return invalid()
-	}
-	switch {
-	case strings.HasPrefix(raw, "aws-secrets-manager://"):
-		rest := strings.TrimPrefix(raw, "aws-secrets-manager://")
-		parts := strings.Split(rest, "/")
-		if len(parts) < 2 || len(parts) > 3 || parts[0] == "" || parts[1] == "" {
-			return invalid()
-		}
-		name, err := url.PathUnescape(parts[1])
-		if err != nil || name == "" {
-			return invalid()
-		}
-		key := ""
-		if len(parts) == 3 {
-			key = parts[2]
-			if key == "" {
-				return invalid()
-			}
-		}
-		return provider.Reference{Scheme: "aws-secrets-manager", Region: parts[0], Container: name, Key: key}, nil
-	case strings.HasPrefix(raw, "aws-secrets-manager-arn://"):
-		match := completeSecretARN.FindStringSubmatch(strings.TrimPrefix(raw, "aws-secrets-manager-arn://"))
-		if match == nil {
-			return invalid()
-		}
-		return provider.Reference{Scheme: "aws-secrets-manager-arn", Region: match[2], Container: match[1], Key: match[3]}, nil
-	case strings.HasPrefix(raw, "aws-ssm://"):
-		rest := strings.TrimPrefix(raw, "aws-ssm://")
-		i := strings.IndexByte(rest, '/')
-		if i <= 0 || i == len(rest)-1 {
-			return invalid()
-		}
-		return provider.Reference{Scheme: "aws-ssm", Region: rest[:i], Container: "/" + strings.TrimLeft(rest[i+1:], "/")}, nil
-	default:
-		return invalid()
-	}
-}
-func invalid() (provider.Reference, error) {
-	return provider.Reference{}, &provider.Error{Kind: provider.InvalidBinding}
-}
-
-func New(ctx context.Context, ref provider.Reference) (provider.Adapter, error) {
-	cfg, err := awscfg.LoadDefaultConfig(ctx, awscfg.WithRegion(ref.Region))
-	if err != nil {
-		return nil, &provider.Error{Kind: provider.Authentication}
-	}
-	if ref.Scheme == "aws-ssm" {
-		return &SSM{C: ssm.NewFromConfig(cfg)}, nil
-	}
-	return &Secrets{C: sm.NewFromConfig(cfg)}, nil
-}
 
 type SecretsAPI interface {
 	GetSecretValue(context.Context, *sm.GetSecretValueInput, ...func(*sm.Options)) (*sm.GetSecretValueOutput, error)
@@ -93,18 +23,7 @@ type SecretsAPI interface {
 }
 type Secrets struct{ C SecretsAPI }
 
-func (s *Secrets) Read(ctx context.Context, ref provider.Reference) (secret.Value, error) {
-	values, err := s.ReadMany(ctx, []provider.Reference{ref})
-	if err != nil {
-		return secret.Value{}, err
-	}
-	return values[0], nil
-}
-func (s *Secrets) Write(ctx context.Context, w []provider.Write) (provider.Receipt, error) {
-	return s.WriteMany(ctx, w)
-}
-
-func (s *Secrets) ReadMany(ctx context.Context, refs []provider.Reference) ([]secret.Value, error) {
+func (s *Secrets) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]secret.Value, error) {
 	if len(refs) == 0 {
 		return nil, nil
 	}
@@ -115,11 +34,9 @@ func (s *Secrets) ReadMany(ctx context.Context, refs []provider.Reference) ([]se
 	if out.SecretString == nil {
 		return nil, &provider.Error{Kind: provider.InvalidState}
 	}
-	values := make([]secret.Value, 0, len(refs))
-	fail := func(err error) ([]secret.Value, error) {
-		for i := range values {
-			values[i].Destroy()
-		}
+	values := make(map[string]secret.Value, len(refs))
+	fail := func(err error) (map[string]secret.Value, error) {
+		secret.DestroyMap(values)
 		return nil, err
 	}
 	doc := map[string]json.RawMessage{}
@@ -129,7 +46,7 @@ func (s *Secrets) ReadMany(ctx context.Context, refs []provider.Reference) ([]se
 			return fail(&provider.Error{Kind: provider.InvalidBinding})
 		}
 		if ref.Blob() {
-			values = append(values, secret.New(*out.SecretString))
+			values[ref.Binding()] = secret.New(*out.SecretString)
 			continue
 		}
 		if !parsed {
@@ -146,7 +63,7 @@ func (s *Secrets) ReadMany(ctx context.Context, refs []provider.Reference) ([]se
 		if json.Unmarshal(raw, &value) != nil {
 			return fail(&provider.Error{Kind: provider.InvalidState})
 		}
-		values = append(values, secret.New(value))
+		values[ref.Binding()] = secret.New(value)
 	}
 	return values, nil
 }
@@ -155,7 +72,7 @@ func (s *Secrets) WriteMany(ctx context.Context, writes []provider.Write) (provi
 		return provider.Receipt{}, nil
 	}
 	id := writes[0].Reference.Container
-	for range 3 {
+	for attempt := range 4 {
 		out, getErr := s.C.GetSecretValue(ctx, &sm.GetSecretValueInput{SecretId: &id})
 		if isMissing(getErr) {
 			payload, err := payloadFor(nil, writes)
@@ -168,6 +85,9 @@ func (s *Secrets) WriteMany(ctx context.Context, writes []provider.Write) (provi
 			var exists *smtypes.ResourceExistsException
 			if !errors.As(err, &exists) {
 				return provider.Receipt{}, remoteError(err)
+			}
+			if attempt == 3 {
+				return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
 			}
 			continue
 		}
@@ -194,14 +114,41 @@ func (s *Secrets) WriteMany(ctx context.Context, writes []provider.Write) (provi
 		if put.VersionId != nil {
 			version = *put.VersionId
 		}
-		_, err = s.C.UpdateSecretVersionStage(ctx, &sm.UpdateSecretVersionStageInput{SecretId: &id, VersionStage: stringPtr("AWSCURRENT"), MoveToVersionId: &version, RemoveFromVersionId: out.VersionId})
-		if err != nil {
+		_, promoteErr := s.C.UpdateSecretVersionStage(ctx, &sm.UpdateSecretVersionStageInput{SecretId: &id, VersionStage: stringPtr("AWSCURRENT"), MoveToVersionId: &version, RemoveFromVersionId: out.VersionId})
+		if promoteErr == nil {
+			if err := s.removePending(ctx, id, stage, version); err != nil {
+				return provider.Receipt{}, err
+			}
+			return provider.Receipt{Completed: environments(writes)}, nil
+		}
+		current, observeErr := s.C.GetSecretValue(ctx, &sm.GetSecretValueInput{SecretId: &id})
+		if observeErr != nil || current == nil || current.VersionId == nil {
+			return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
+		}
+		if err := s.removePending(ctx, id, stage, version); err != nil {
+			return provider.Receipt{}, err
+		}
+		switch *current.VersionId {
+		case version:
+			return provider.Receipt{Completed: environments(writes)}, nil
+		case *out.VersionId:
+			return provider.Receipt{}, remoteError(promoteErr)
+		default:
+			if attempt == 3 {
+				return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
+			}
 			continue
 		}
-		_, _ = s.C.UpdateSecretVersionStage(ctx, &sm.UpdateSecretVersionStageInput{SecretId: &id, VersionStage: &stage, RemoveFromVersionId: &version})
-		return provider.Receipt{Completed: environments(writes)}, nil
 	}
 	return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
+}
+
+func (s *Secrets) removePending(ctx context.Context, id, stage, version string) error {
+	_, err := s.C.UpdateSecretVersionStage(ctx, &sm.UpdateSecretVersionStageInput{SecretId: &id, VersionStage: &stage, RemoveFromVersionId: &version})
+	if err != nil {
+		return &provider.Error{Kind: provider.Indeterminate}
+	}
+	return nil
 }
 func payloadFor(existing *string, writes []provider.Write) (string, error) {
 	if writes[0].Reference.Blob() {
@@ -235,66 +182,6 @@ func randomToken() (string, error) {
 }
 func stringPtr(s string) *string { return &s }
 
-type SSMAPI interface {
-	GetParameter(context.Context, *ssm.GetParameterInput, ...func(*ssm.Options)) (*ssm.GetParameterOutput, error)
-	PutParameter(context.Context, *ssm.PutParameterInput, ...func(*ssm.Options)) (*ssm.PutParameterOutput, error)
-}
-type SSM struct{ C SSMAPI }
-
-func (s *SSM) Read(ctx context.Context, ref provider.Reference) (secret.Value, error) {
-	values, err := s.ReadMany(ctx, []provider.Reference{ref})
-	if err != nil {
-		return secret.Value{}, err
-	}
-	return values[0], nil
-}
-func (s *SSM) Write(ctx context.Context, w []provider.Write) (provider.Receipt, error) {
-	return s.WriteMany(ctx, w)
-}
-
-func (s *SSM) ReadMany(ctx context.Context, refs []provider.Reference) ([]secret.Value, error) {
-	values := make([]secret.Value, 0, len(refs))
-	decrypt := true
-	for _, ref := range refs {
-		out, err := s.C.GetParameter(ctx, &ssm.GetParameterInput{Name: &ref.Container, WithDecryption: &decrypt})
-		if err != nil {
-			for i := range values {
-				values[i].Destroy()
-			}
-			return nil, remoteError(err)
-		}
-		if out.Parameter == nil || out.Parameter.Value == nil || out.Parameter.Type != ssmtypes.ParameterTypeSecureString {
-			for i := range values {
-				values[i].Destroy()
-			}
-			return nil, &provider.Error{Kind: provider.InvalidState}
-		}
-		values = append(values, secret.New(*out.Parameter.Value))
-	}
-	return values, nil
-}
-func (s *SSM) WriteMany(ctx context.Context, writes []provider.Write) (provider.Receipt, error) {
-	provider.SortedWrites(writes)
-	done := []string{}
-	overwrite := true
-	for _, write := range writes {
-		value := write.Value.Reveal()
-		name := write.Reference.Container
-		if _, err := s.C.PutParameter(ctx, &ssm.PutParameterInput{Name: &name, Value: &value, Type: ssmtypes.ParameterTypeSecureString, Overwrite: &overwrite}); err != nil {
-			return provider.Receipt{Completed: done}, remoteError(err)
-		}
-		done = append(done, write.Environment)
-	}
-	return provider.Receipt{Completed: done}, nil
-}
-func environments(w []provider.Write) []string {
-	out := make([]string, 0, len(w))
-	for _, x := range w {
-		out = append(out, x.Environment)
-	}
-	sort.Strings(out)
-	return out
-}
 func isMissing(err error) bool {
 	var missing *smtypes.ResourceNotFoundException
 	return errors.As(err, &missing)

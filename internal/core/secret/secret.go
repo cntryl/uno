@@ -24,6 +24,14 @@ func (v *Value) Destroy() {
 	runtime.KeepAlive(v)
 }
 
+// DestroyMap destroys every owned value and empties the map.
+func DestroyMap(values map[string]Value) {
+	for key, value := range values {
+		value.Destroy()
+		delete(values, key)
+	}
+}
+
 func SortedKeys(values map[string]Value) []string {
 	keys := make([]string, 0, len(values))
 	for key := range values {

@@ -124,7 +124,7 @@ func executeWithRegistry(ctx context.Context, args []string, providers *provider
 		if err != nil {
 			return 0, err
 		}
-		defer destroyValues(values)
+		defer secret.DestroyMap(values)
 		if err := devguard.Check(ctx, "."); err != nil {
 			return 0, err
 		}
@@ -144,10 +144,10 @@ func executeWithRegistry(ctx context.Context, args []string, providers *provider
 		if err != nil {
 			return 0, err
 		}
-		defer destroyValues(values)
+		defer secret.DestroyMap(values)
 		cmd := exec.CommandContext(ctx, commandArgs[0], commandArgs[1:]...)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-		cmd.Env = safeChildEnvironment(os.Environ())
+		cmd.Env = safeChildEnvironment(os.Environ(), a.registry.CapabilityVariables())
 		for _, key := range secret.SortedKeys(values) {
 			cmd.Env = append(cmd.Env, key+"="+values[key].Reveal())
 		}
@@ -162,24 +162,6 @@ func executeWithRegistry(ctx context.Context, args []string, providers *provider
 	default:
 		return 0, fmt.Errorf("unknown command %q", command)
 	}
-}
-
-func destroyValues(values map[string]secret.Value) {
-	for key, value := range values {
-		value.Destroy()
-		delete(values, key)
-	}
-}
-func safeChildEnvironment(environment []string) []string {
-	blocked := map[string]bool{"OP_SERVICE_ACCOUNT_TOKEN": true, "OP_ACCOUNT": true, "AWS_ACCESS_KEY_ID": true, "AWS_SECRET_ACCESS_KEY": true, "AWS_SESSION_TOKEN": true, "AWS_SECURITY_TOKEN": true, "AWS_PROFILE": true, "AWS_DEFAULT_PROFILE": true, "AWS_ROLE_ARN": true, "AWS_ROLE_SESSION_NAME": true, "AWS_WEB_IDENTITY_TOKEN_FILE": true, "AWS_SHARED_CREDENTIALS_FILE": true, "AWS_CONFIG_FILE": true, "AWS_SDK_LOAD_CONFIG": true, "AWS_CONTAINER_CREDENTIALS_FULL_URI": true, "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI": true, "AWS_CONTAINER_AUTHORIZATION_TOKEN": true, "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE": true, "AWS_EC2_METADATA_SERVICE_ENDPOINT": true, "AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE": true}
-	out := make([]string, 0, len(environment))
-	for _, entry := range environment {
-		key, _, ok := strings.Cut(entry, "=")
-		if ok && !blocked[key] {
-			out = append(out, entry)
-		}
-	}
-	return out
 }
 
 func registry() *provider.Registry {

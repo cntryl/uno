@@ -46,25 +46,53 @@ type fakeAdapter struct {
 	writes   [][]provider.Write
 	values   map[string]string
 	failRead string
+	result   func([]provider.Reference) map[string]secret.Value
 }
 
-func (f *fakeAdapter) Read(_ context.Context, r provider.Reference) (secret.Value, error) {
-	f.reads = append(f.reads, r.Binding())
-	if r.Key == f.failRead {
-		return secret.Value{}, errors.New("remote leaked secret")
+func (f *fakeAdapter) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]secret.Value, error) {
+	_ = ctx
+	if f.result != nil {
+		return f.result(refs), nil
 	}
-	return secret.New(f.values[r.Key]), nil
-}
-func (f *fakeAdapter) ReadMany(ctx context.Context, refs []provider.Reference) ([]secret.Value, error) {
-	out := make([]secret.Value, 0, len(refs))
+	out := make(map[string]secret.Value, len(refs))
 	for _, r := range refs {
-		v, err := f.Read(ctx, r)
-		if err != nil {
-			return nil, err
+		f.reads = append(f.reads, r.Binding())
+		if r.Key == f.failRead {
+			return nil, errors.New("remote leaked secret")
 		}
-		out = append(out, v)
+		out[r.Binding()] = secret.New(f.values[r.Key])
 	}
 	return out, nil
+}
+
+func TestResolveUsesBindingKeysAndDeduplicatesConsumers(t *testing.T) {
+	adapter := &fakeAdapter{result: func(refs []provider.Reference) map[string]secret.Value {
+		if len(refs) != 2 {
+			t.Fatalf("refs=%d", len(refs))
+		}
+		return map[string]secret.Value{refs[1].Binding(): secret.New("two"), refs[0].Binding(): secret.New("one")}
+	}}
+	p := planFor(t, "A=fake://s/a -> fake://d/a\nB=fake://s/b -> fake://d/b\nC=fake://s/a -> fake://d/c\n", adapter)
+	values, err := Resolve(context.Background(), p)
+	if err != nil || values["A"].Reveal() != "one" || values["B"].Reveal() != "two" || values["C"].Reveal() != "one" {
+		t.Fatalf("values=%v err=%v", values, err)
+	}
+	secret.DestroyMap(values)
+}
+
+func TestResolveRejectsMissingAndUnexpectedKeys(t *testing.T) {
+	for _, result := range []func([]provider.Reference) map[string]secret.Value{
+		func([]provider.Reference) map[string]secret.Value { return map[string]secret.Value{} },
+		func(refs []provider.Reference) map[string]secret.Value {
+			return map[string]secret.Value{refs[0].Binding(): secret.New("one"), "unexpected": secret.New("leak")}
+		},
+	} {
+		adapter := &fakeAdapter{result: result}
+		p := planFor(t, "A=fake://s/a -> fake://d/a\n", adapter)
+		if _, err := Sync(context.Background(), p); err == nil || len(adapter.writes) != 0 || !stringsContains(err.Error(), "InvalidState") {
+			t.Fatalf("writes=%v err=%v", adapter.writes, err)
+		}
+	}
 }
 func (f *fakeAdapter) WriteMany(_ context.Context, w []provider.Write) (provider.Receipt, error) {
 	f.writes = append(f.writes, w)
