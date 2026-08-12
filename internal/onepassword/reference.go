@@ -44,7 +44,7 @@ func New(ctx context.Context) (*Adapter, error) {
 	if err != nil {
 		return nil, err
 	}
-	options = append(options, op.WithIntegrationInfo("uno", "0.1.0"))
+	options = append(options, op.WithIntegrationInfo("uno", "0.1.1"))
 	client, err := op.NewClient(ctx, options...)
 	if err != nil {
 		return nil, &provider.Error{Kind: provider.Authentication}

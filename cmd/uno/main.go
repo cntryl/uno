@@ -22,7 +22,7 @@ import (
 	opbridge "github.com/cntryl/uno/internal/onepassword"
 )
 
-const version = "0.1.0"
+const version = "0.1.1"
 
 type app struct {
 	templatePath string
