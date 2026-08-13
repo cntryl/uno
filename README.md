@@ -173,14 +173,18 @@ desktop integration. The service-account token takes precedence.
 ```text
 aws-secrets-manager://region/secret-name
 aws-secrets-manager://region/secret-name/key
+aws-secrets-manager://region/path/to/secret-name/key
 aws-secrets-manager-arn://$MY_SECRET_ARN
 aws-secrets-manager-arn://$MY_SECRET_ARN/key
 ```
 
-Same-account names use the AWS credential chain. Percent-encode `/` inside a
-secret name, for example `my-team%2Fmy-service`. A blob reference addresses the
-raw `SecretString`; a keyed reference addresses one top-level JSON string and
-preserves sibling properties. Missing destination secrets are created.
+Same-account names use the AWS credential chain. For keyed references, the
+final path segment is the JSON key and every preceding segment after the region
+is the secret name. A blob reference addresses the raw `SecretString`; because
+it has no key delimiter, percent-encode `/` inside a blob secret name, for
+example `my-team%2Fmy-service`. A keyed reference addresses one top-level JSON
+string and preserves sibling properties. Missing destination secrets are
+created.
 
 For cross-account access, the ARN variable must contain the complete
 AWS-generated secret ARN, including its suffix. Configure the resource policy,

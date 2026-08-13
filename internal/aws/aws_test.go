@@ -23,6 +23,7 @@ import (
 func TestShouldParseOrRejectGivenWellFormedAndMalformedURIs(t *testing.T) {
 	cases := map[string]provider.Reference{
 		"aws-secrets-manager://us-east-1/team%2Fservice/key":                                                     {Scheme: "aws-secrets-manager", Region: "us-east-1", Container: "team/service", Key: "key", AdapterKey: "secrets-manager\x00us-east-1"},
+		"aws-secrets-manager://us-east-1//team/service/key":                                                      {Scheme: "aws-secrets-manager", Region: "us-east-1", Container: "/team/service", Key: "key", AdapterKey: "secrets-manager\x00us-east-1"},
 		"aws-secrets-manager-arn://arn:aws:secretsmanager:us-west-2:123456789012:secret:prod/service-Ab12Cd/key": {Scheme: "aws-secrets-manager-arn", Region: "us-west-2", Container: "arn:aws:secretsmanager:us-west-2:123456789012:secret:prod/service-Ab12Cd", Key: "key", AdapterKey: "secrets-manager\x00us-west-2"},
 		"aws-ssm://eu-west-1/full/parameter/path":                                                                {Scheme: "aws-ssm", Region: "eu-west-1", Container: "/full/parameter/path", AdapterKey: "ssm\x00eu-west-1"},
 	}
@@ -32,7 +33,7 @@ func TestShouldParseOrRejectGivenWellFormedAndMalformedURIs(t *testing.T) {
 			t.Fatalf("%s: got=%#v want=%#v err=%v", raw, got, want, err)
 		}
 	}
-	for _, raw := range []string{"aws-secrets-manager://r/name/extra/key", "aws-secrets-manager-arn://arn:aws:secretsmanager:r:123:secret:name", "aws-ssm://r"} {
+	for _, raw := range []string{"aws-secrets-manager-arn://arn:aws:secretsmanager:r:123:secret:name", "aws-ssm://r"} {
 		if _, err := Parse(raw); err == nil {
 			t.Fatalf("accepted %s", raw)
 		}

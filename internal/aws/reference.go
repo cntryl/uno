@@ -48,22 +48,23 @@ func Parse(raw string) (provider.Reference, error) {
 }
 
 func parseSecretName(raw string) (provider.Reference, error) {
-	parts := strings.Split(raw, "/")
-	if len(parts) < 2 || len(parts) > 3 || parts[0] == "" || parts[1] == "" {
+	separator := strings.IndexByte(raw, '/')
+	if separator <= 0 || separator == len(raw)-1 {
 		return invalidReference("Secrets Manager reference requires region/secret-name[/key]")
 	}
-	name, err := url.PathUnescape(parts[1])
+	region, binding := raw[:separator], raw[separator+1:]
+	nameRaw, key := binding, ""
+	if keySeparator := strings.LastIndexByte(binding, '/'); keySeparator >= 0 {
+		nameRaw, key = binding[:keySeparator], binding[keySeparator+1:]
+		if nameRaw == "" || key == "" {
+			return invalidReference("Secrets Manager reference requires region/secret-name[/key]")
+		}
+	}
+	name, err := url.PathUnescape(nameRaw)
 	if err != nil || name == "" {
 		return invalidReference("Secrets Manager secret name has invalid percent-encoding")
 	}
-	key := ""
-	if len(parts) == 3 {
-		key = parts[2]
-		if key == "" {
-			return invalidReference("Secrets Manager key must not be empty")
-		}
-	}
-	return provider.Reference{Scheme: "aws-secrets-manager", Region: parts[0], Container: name, Key: key, AdapterKey: "secrets-manager\x00" + parts[0]}, nil
+	return provider.Reference{Scheme: "aws-secrets-manager", Region: region, Container: name, Key: key, AdapterKey: "secrets-manager\x00" + region}, nil
 }
 
 func parseSecretARN(raw string) (provider.Reference, error) {
