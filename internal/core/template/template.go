@@ -17,6 +17,12 @@ type Error struct {
 	Message      string
 }
 
+type destinationAlias struct {
+	prefix string
+	line   int
+	used   bool
+}
+
 func (e *Error) Error() string      { return fmt.Sprintf("%d:%d: %s", e.Line, e.Column, e.Message) }
 func terr(l, c int, m string) error { return &Error{l, c, m} }
 
@@ -27,6 +33,7 @@ func ParseEnv(input string, env func(string) (string, bool)) (*File, error) {
 	}
 	f := &File{}
 	seen := map[string]bool{}
+	aliases := map[string]*destinationAlias{}
 	for i, raw := range strings.Split(input, "\n") {
 		line := strings.TrimSuffix(raw, "\r")
 		trimmed := strings.TrimSpace(line)
@@ -38,6 +45,33 @@ func ParseEnv(input string, env func(string) (string, bool)) (*File, error) {
 			return nil, terr(i+1, 1, "mapping must contain =")
 		}
 		key := strings.TrimSpace(line[:eq])
+		if strings.HasPrefix(trimmed, "@") {
+			if !validAlias(key) {
+				return nil, terr(i+1, 1, "invalid destination alias name")
+			}
+			if aliases[key] != nil {
+				return nil, terr(i+1, 1, "duplicate destination alias")
+			}
+			prefixRaw := strings.TrimSpace(line[eq+1:])
+			if prefixRaw == "" {
+				return nil, terr(i+1, eq+2, "destination alias prefix is required")
+			}
+			if strings.HasPrefix(prefixRaw, "@") {
+				return nil, terr(i+1, eq+2, "destination aliases cannot reference aliases")
+			}
+			prefix, err := expand(prefixRaw, env)
+			if err != nil {
+				return nil, terr(i+1, eq+2, err.Error())
+			}
+			if strings.HasPrefix(prefix, "@") {
+				return nil, terr(i+1, eq+2, "destination aliases cannot reference aliases")
+			}
+			if strings.HasSuffix(prefix, "/") {
+				return nil, terr(i+1, eq+2, "destination alias prefix must not end with /")
+			}
+			aliases[key] = &destinationAlias{prefix: prefix, line: i + 1}
+			continue
+		}
 		if !validKey(key) {
 			return nil, terr(i+1, 1, "invalid environment key")
 		}
@@ -54,20 +88,45 @@ func ParseEnv(input string, env func(string) (string, bool)) (*File, error) {
 		if sourceRaw == "" || destinationRaw == "" {
 			return nil, terr(i+1, eq+2, "source and destination references are required")
 		}
+		if strings.HasPrefix(sourceRaw, "@") {
+			return nil, terr(i+1, eq+2, "destination aliases cannot be used as sources")
+		}
 		source, err := expand(sourceRaw, env)
 		if err != nil {
 			return nil, terr(i+1, eq+2, err.Error())
 		}
-		destination, err := expand(destinationRaw, env)
-		if err != nil {
-			return nil, terr(i+1, eq+arrow+4, err.Error())
+		var destination string
+		if strings.HasPrefix(destinationRaw, "@") {
+			if !validAlias(destinationRaw) {
+				return nil, terr(i+1, eq+arrow+4, "destination alias must be the entire destination")
+			}
+			alias := aliases[destinationRaw]
+			if alias == nil {
+				return nil, terr(i+1, eq+arrow+4, "destination alias is undefined or declared after use")
+			}
+			alias.used = true
+			destination = alias.prefix + "/" + key
+		} else {
+			destination, err = expand(destinationRaw, env)
+			if err != nil {
+				return nil, terr(i+1, eq+arrow+4, err.Error())
+			}
 		}
 		f.Entries = append(f.Entries, Entry{key, source, destination, i + 1})
+	}
+	for _, alias := range aliases {
+		if !alias.used {
+			return nil, terr(alias.line, 1, "destination alias is unused")
+		}
 	}
 	if len(f.Entries) == 0 {
 		return nil, terr(1, 1, "template must contain at least one mapping")
 	}
 	return f, nil
+}
+
+func validAlias(s string) bool {
+	return strings.HasPrefix(s, "@") && validKey(strings.TrimPrefix(s, "@"))
 }
 
 func expand(s string, env func(string) (string, bool)) (string, error) {

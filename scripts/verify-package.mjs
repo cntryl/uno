@@ -34,7 +34,7 @@ try {
   const metadata = JSON.parse(
     readFileSync(join(directory, 'node_modules/@cntryl/uno/package.json'), 'utf8'),
   );
-  if (metadata.version !== '0.1.1') throw new Error('installed package has the wrong version');
+  if (metadata.version !== '0.1.2') throw new Error('installed package has the wrong version');
 } finally {
   rmSync(directory, { recursive: true, force: true });
 }

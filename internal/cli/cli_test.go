@@ -54,8 +54,24 @@ func (f cliFactory) Adapter(context.Context, provider.Reference) (provider.Adapt
 	return f.adapter, nil
 }
 
+type aliasCliFactory struct{ adapter *cliAdapter }
+
+func (f aliasCliFactory) Parse(raw string) (provider.Reference, error) {
+	parts := strings.SplitN(strings.TrimPrefix(raw, "fake://"), "/", 2)
+	ref := provider.Reference{Scheme: "fake", Container: parts[0]}
+	if len(parts) == 2 {
+		ref.Key = parts[1]
+	}
+	return ref, nil
+}
+func (f aliasCliFactory) Adapter(context.Context, provider.Reference) (provider.Adapter, error) {
+	f.adapter.accesses++
+	return f.adapter, nil
+}
+
 type cliAdapter struct {
 	accesses, reads, writes, readCalls int
+	readBatchSizes                     []int
 	value                              string
 	read                               func(context.Context, []provider.Reference) (map[string]secret.Value, error)
 	write                              func(context.Context, []provider.Write) (provider.Receipt, error)
@@ -71,6 +87,7 @@ type cliAdapter struct {
 // for a first sync, and keeps every pre-existing test's "the write step
 // gets attempted" assumption true without each needing to seed a fake store.
 func (a *cliAdapter) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]provider.ReadResult, error) {
+	a.readBatchSizes = append(a.readBatchSizes, len(refs))
 	if a.read != nil {
 		old, err := a.read(ctx, refs)
 		out := make(map[string]provider.ReadResult, len(old))
@@ -372,6 +389,29 @@ func TestShouldSkipProviderAccessGivenCheckOrDryRunCommand(t *testing.T) {
 	}
 	if adapter.accesses != 1 {
 		t.Fatalf("provider accesses=%d", adapter.accesses)
+	}
+}
+
+func TestShouldBindAliasMappingsToOneKeyedContainerAndKeepCheckOffline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "template")
+	input := "@runtime=fake://runtime\nFIRST=fake://source/FIRST -> @runtime\nSECOND=fake://source/SECOND -> @runtime\n"
+	if err := os.WriteFile(path, []byte(input), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &cliAdapter{}
+	registry := provider.NewRegistry()
+	registry.Register("fake", aliasCliFactory{adapter})
+	if _, _, err := run([]string{"--template", path, "check"}, registry); err != nil {
+		t.Fatal(err)
+	}
+	if adapter.accesses != 0 || len(adapter.readBatchSizes) != 0 {
+		t.Fatalf("check contacted provider: accesses=%d batches=%v", adapter.accesses, adapter.readBatchSizes)
+	}
+	if _, _, err := run([]string{"--template", path, "sync", "--dry-run"}, registry); err != nil {
+		t.Fatal(err)
+	}
+	if adapter.accesses != 1 || len(adapter.readBatchSizes) != 2 || adapter.readBatchSizes[0] != 2 || adapter.readBatchSizes[1] != 2 {
+		t.Fatalf("accesses=%d read batches=%v", adapter.accesses, adapter.readBatchSizes)
 	}
 }
 

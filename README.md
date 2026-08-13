@@ -20,7 +20,9 @@ Follow this sequence unless the user explicitly requests something else:
    this file.
 
    ```dotenv
-   MY_API_KEY=op://$OP_VAULT/my-service/MY_API_KEY -> aws-secrets-manager://$AWS_REGION/my-service/MY_API_KEY
+   @runtime=aws-secrets-manager://$AWS_REGION/my-service/runtime
+
+   MY_API_KEY=op://$OP_VAULT/my-service/MY_API_KEY -> @runtime
    MY_DATABASE_URL=op://${OP_VAULT}/my-service/MY_DATABASE_URL -> aws-ssm://${AWS_REGION}/my-service/MY_DATABASE_URL
    ```
 
@@ -101,6 +103,7 @@ npx uno rollback --force --json # {"results":[{"environment":"...","status":"rev
 Each non-comment line has this exact grammar:
 
 ```text
+@ALIAS=<destination reference prefix>
 ENV_KEY=<source reference> -> <destination reference>
 ```
 
@@ -108,6 +111,27 @@ ENV_KEY=<source reference> -> <destination reference>
 - `ENV_KEY` names the value in `.env.secrets`, a `run` child environment, and
   command output. It must match `[A-Za-z_][A-Za-z0-9_]*`.
 - `$NAME` and `${NAME}` are expanded once from the current environment.
+- A named destination alias matches `@[A-Za-z_][A-Za-z0-9_]*` and expands to
+  `<destination reference prefix>/<ENV_KEY>`. For example, these mappings
+  address two fields in one destination container:
+
+  ```dotenv
+  @runtime=aws-secrets-manager://$AWS_REGION/my-service/runtime
+
+  MY_API_KEY=op://$OP_VAULT/my-service/api_key -> @runtime
+  MY_DATABASE_URL=op://$OP_VAULT/my-service/database_url -> @runtime
+  ```
+
+  Declarations are case-sensitive and must precede their uses. Duplicate,
+  undefined, forward-referenced, malformed, chained, and unused aliases are
+  rejected. A prefix must not end in `/`. An alias is valid only as the entire
+  destination expression; it cannot be a source or be extended as
+  `@runtime/OTHER_KEY`. Placeholders in a declaration are expanded once when
+  the declaration is parsed.
+
+- An alias always uses `ENV_KEY` as the appended destination segment. Use an
+  explicit destination reference when the destination field or parameter name
+  must differ.
 - Blank lines and full-line comments are ignored.
 - Missing variables, malformed references, NUL, duplicate environment keys,
   duplicate destinations, and mixed blob/key writes to one container fail
@@ -168,6 +192,10 @@ section path. Vaults, items, sections, and fields resolve by exact title or ID;
 ambiguity fails. Set `OP_SERVICE_ACCOUNT_TOKEN` in CI or `OP_ACCOUNT` for
 desktop integration. The service-account token takes precedence.
 
+A destination alias prefix ends at the item; `ENV_KEY` becomes its field (or
+the final field below a section path included in the prefix). Destination items
+must already exist and be Secure Notes.
+
 ### AWS Secrets Manager
 
 ```text
@@ -190,6 +218,9 @@ For cross-account access, the ARN variable must contain the complete
 AWS-generated secret ARN, including its suffix. Configure the resource policy,
 caller IAM permission, and KMS access before running `sync`.
 
+A destination alias prefix ends at the secret name or complete ARN;
+`ENV_KEY` becomes the top-level JSON key.
+
 ### AWS Systems Manager
 
 ```text
@@ -198,6 +229,8 @@ aws-ssm://region/full/parameter/path
 
 This addresses one exact `SecureString`. Writes are deterministic and
 sequential; a failure reports mappings completed before the failure.
+For a destination alias, `ENV_KEY` is appended to the prefix and becomes part
+of the exact parameter path rather than a JSON field.
 
 ### HashiCorp Vault (KV v2)
 
@@ -210,6 +243,8 @@ between it and the final segment is the (possibly multi-segment) secret
 path; the last segment is the field name. Uses the standard `VAULT_ADDR` and
 `VAULT_TOKEN` environment variables. Writes merge into the existing document
 and use the KV v2 engine's native check-and-set option, retried on conflict.
+A destination alias prefix ends at the secret path; `ENV_KEY` becomes the KV
+v2 document field.
 
 ### GCP Secret Manager
 
@@ -225,6 +260,8 @@ payload; a keyed reference addresses one top-level JSON field and preserves
 siblings. Missing destination secrets are created. Unlike AWS Secrets
 Manager and Vault, the stable API has no compare-and-swap primitive for
 writes — a racing concurrent writer can still clobber a merge.
+A destination alias prefix ends at the secret name; `ENV_KEY` becomes the
+top-level JSON key.
 
 ### Azure Key Vault
 
@@ -247,6 +284,8 @@ empty JSON object. Azure Key Vault has no conditional value-write primitive,
 so concurrent keyed read-modify-write operations can lose an intervening
 sibling update. Uno does not retry an ambiguous `SetSecret` failure because
 that could create duplicate versions.
+A destination alias prefix ends at the secret name; `ENV_KEY` becomes the
+top-level JSON key.
 
 ## Repository development
 
