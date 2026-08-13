@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -124,7 +125,12 @@ func TestShouldReturnRedactedTimeoutErrorGivenBlockingProvider(t *testing.T) {
 func TestShouldCompleteChildProcessGivenProviderTimeoutExpiresDuringRun(t *testing.T) {
 	adapter := &cliAdapter{}
 	path := templateFile(t)
-	code, err := executeWithRegistry(context.Background(), []string{"--template", path, "--timeout", "1ms", "run", "--", "/bin/sh", "-c", "sleep 0.03; test \"$VALUE\" = resolved"}, cliRegistry(adapter))
+	command := []string{"/bin/sh", "-c", "sleep 0.03; test \"$VALUE\" = resolved"}
+	if runtime.GOOS == "windows" {
+		command = []string{"powershell", "-NoProfile", "-Command", "Start-Sleep -Milliseconds 30; if ($env:VALUE -ne 'resolved') { exit 1 }"}
+	}
+	args := append([]string{"--template", path, "--timeout", "1ms", "run", "--"}, command...)
+	code, err := executeWithRegistry(context.Background(), args, cliRegistry(adapter))
 	if err != nil || code != 0 {
 		t.Fatalf("code=%d err=%v", code, err)
 	}
@@ -406,7 +412,12 @@ func TestShouldReadOnceAndPreserveExitCodeGivenRunCommand(t *testing.T) {
 	adapter := &cliAdapter{}
 	providers := cliRegistry(adapter)
 	path := templateFile(t)
-	code, err := executeWithRegistry(context.Background(), []string{"--template", path, "run", "--", "/bin/sh", "-c", "test \"$VALUE\" = resolved; exit 7"}, providers)
+	command := []string{"/bin/sh", "-c", "test \"$VALUE\" = resolved; exit 7"}
+	if runtime.GOOS == "windows" {
+		command = []string{"powershell", "-NoProfile", "-Command", "if ($env:VALUE -ne 'resolved') { exit 1 }; exit 7"}
+	}
+	args := append([]string{"--template", path, "run", "--"}, command...)
+	code, err := executeWithRegistry(context.Background(), args, providers)
 	if err != nil || code != 7 || adapter.reads != 1 || adapter.writes != 0 {
 		t.Fatalf("code=%d reads=%d writes=%d err=%v", code, adapter.reads, adapter.writes, err)
 	}
@@ -492,7 +503,12 @@ func TestShouldTreatDoubleDashAsFlagValueGivenTemplateFlagPrecedesSeparator(t *t
 		t.Fatal(err)
 	}
 	adapter := &cliAdapter{}
-	code, err := executeWithRegistry(context.Background(), []string{"run", "--template", "--", "--", "/usr/bin/true"}, cliRegistry(adapter))
+	command := []string{"/usr/bin/true"}
+	if runtime.GOOS == "windows" {
+		command = []string{"cmd", "/C", "exit", "0"}
+	}
+	args := append([]string{"run", "--template", "--", "--"}, command...)
+	code, err := executeWithRegistry(context.Background(), args, cliRegistry(adapter))
 	if err != nil || code != 0 || adapter.reads != 1 {
 		t.Fatalf("code=%d reads=%d err=%v", code, adapter.reads, err)
 	}
@@ -596,7 +612,7 @@ func TestShouldWriteEscapedSecretsFileWithRestrictedPermissionsGivenDevCommand(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 || adapter.reads != 1 || adapter.writes != 0 {
+	if (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) || adapter.reads != 1 || adapter.writes != 0 {
 		t.Fatalf("mode=%o reads=%d writes=%d", info.Mode().Perm(), adapter.reads, adapter.writes)
 	}
 }
