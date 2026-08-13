@@ -15,11 +15,12 @@ import (
 	smtypes "github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
+	smithy "github.com/aws/smithy-go"
 	"github.com/cntryl/uno/internal/core/provider"
 	"github.com/cntryl/uno/internal/core/secret"
 )
 
-func TestParsesReferences(t *testing.T) {
+func TestShouldParseOrRejectGivenWellFormedAndMalformedURIs(t *testing.T) {
 	cases := map[string]provider.Reference{
 		"aws-secrets-manager://us-east-1/team%2Fservice/key":                                                     {Scheme: "aws-secrets-manager", Region: "us-east-1", Container: "team/service", Key: "key", AdapterKey: "secrets-manager\x00us-east-1"},
 		"aws-secrets-manager-arn://arn:aws:secretsmanager:us-west-2:123456789012:secret:prod/service-Ab12Cd/key": {Scheme: "aws-secrets-manager-arn", Region: "us-west-2", Container: "arn:aws:secretsmanager:us-west-2:123456789012:secret:prod/service-Ab12Cd", Key: "key", AdapterKey: "secrets-manager\x00us-west-2"},
@@ -111,7 +112,7 @@ func (f *promotionFake) UpdateSecretVersionStage(_ context.Context, in *sm.Updat
 	return &sm.UpdateSecretVersionStageOutput{}, nil
 }
 
-func TestPromotionAndObservationFailureStillAttemptsPendingCleanup(t *testing.T) {
+func TestShouldAttemptPendingCleanupGivenPromotionAndObservationFailure(t *testing.T) {
 	fake := &promotionFake{current: "original", promoteFailures: 1, observeFailure: true}
 	write := provider.Write{Environment: "MY_API_KEY", Reference: provider.Reference{Container: "secret", Key: "key"}, Value: secret.New("new")}
 	_, err := (&Secrets{C: fake}).WriteMany(context.Background(), []provider.Write{write})
@@ -121,7 +122,7 @@ func TestPromotionAndObservationFailureStillAttemptsPendingCleanup(t *testing.T)
 	}
 }
 
-func TestPromotionFailureWhoseCandidateIsCurrentSucceedsAfterCleanup(t *testing.T) {
+func TestShouldSucceedGivenPromotionFailureWhoseCandidateBecameCurrent(t *testing.T) {
 	fake := &promotionFake{current: "original", promoteFailures: 1}
 	write := provider.Write{Environment: "MY_API_KEY", Reference: provider.Reference{Container: "secret", Key: "key"}, Value: secret.New("new")}
 	receipt, err := (&Secrets{C: fake}).WriteMany(context.Background(), []provider.Write{write})
@@ -130,7 +131,7 @@ func TestPromotionFailureWhoseCandidateIsCurrentSucceedsAfterCleanup(t *testing.
 	}
 }
 
-func TestPendingCleanupFailureHasDistinctSafeKind(t *testing.T) {
+func TestShouldReturnPendingCleanupFailedKindGivenCleanupFailure(t *testing.T) {
 	fake := &promotionFake{current: "original", cleanupFailures: 1}
 	write := provider.Write{Environment: "MY_API_KEY", Reference: provider.Reference{Container: "secret", Key: "key"}, Value: secret.New("new")}
 	receipt, err := (&Secrets{C: fake}).WriteMany(context.Background(), []provider.Write{write})
@@ -140,7 +141,7 @@ func TestPendingCleanupFailureHasDistinctSafeKind(t *testing.T) {
 	}
 }
 
-func TestObservedSuccessfulPromotionReportsCompletedWhenCleanupFails(t *testing.T) {
+func TestShouldReportCompletedGivenPromotionSucceededAndCleanupFailed(t *testing.T) {
 	fake := &promotionFake{current: "original", promoteFailures: 1, cleanupFailures: 1}
 	write := provider.Write{Environment: "MY_API_KEY", Reference: provider.Reference{Container: "secret", Key: "key"}, Value: secret.New("new")}
 	receipt, err := (&Secrets{C: fake}).WriteMany(context.Background(), []provider.Write{write})
@@ -150,7 +151,7 @@ func TestObservedSuccessfulPromotionReportsCompletedWhenCleanupFails(t *testing.
 	}
 }
 
-func TestUnchangedCurrentAfterPromotionErrorConsumesRetryBudget(t *testing.T) {
+func TestShouldConsumeRetryBudgetGivenUnchangedCurrentAfterPromotionError(t *testing.T) {
 	fake := &promotionFake{current: "original", promoteFailures: 1}
 	fake.thirdPartyConflict = false
 	fake.candidate = "prevent-auto-current"
@@ -173,7 +174,7 @@ func (f *unchangedPromotionFake) UpdateSecretVersionStage(ctx context.Context, i
 	return f.promotionFake.UpdateSecretVersionStage(ctx, in, opts...)
 }
 
-func TestAmbiguousPromotionCleanupFailureHasDistinctSafeKind(t *testing.T) {
+func TestShouldReturnPendingCleanupFailedKindGivenAmbiguousPromotionAndCleanupFailure(t *testing.T) {
 	fake := &promotionFake{current: "original", promoteFailures: 1, observeFailure: true, cleanupFailures: 1}
 	write := provider.Write{Environment: "MY_API_KEY", Reference: provider.Reference{Container: "secret", Key: "key"}, Value: secret.New("new")}
 	_, err := (&Secrets{C: fake}).WriteMany(context.Background(), []provider.Write{write})
@@ -199,7 +200,7 @@ func (*createRaceFake) UpdateSecretVersionStage(context.Context, *sm.UpdateSecre
 	return nil, errors.New("unexpected update")
 }
 
-func TestCreateRaceWaitsBeforeRetriesButNotAfterFinalAttempt(t *testing.T) {
+func TestShouldBackoffBeforeEachRetryButNotAfterFinalAttemptGivenCreateRace(t *testing.T) {
 	fake := &createRaceFake{}
 	var delays, caps []time.Duration
 	a := &Secrets{C: fake, jitter: func(ceiling time.Duration) time.Duration { caps = append(caps, ceiling); return ceiling / 2 }, wait: func(_ context.Context, delay time.Duration) error { delays = append(delays, delay); return nil }}
@@ -210,7 +211,7 @@ func TestCreateRaceWaitsBeforeRetriesButNotAfterFinalAttempt(t *testing.T) {
 	}
 }
 
-func TestCreateRaceCancellationDuringBackoffIsIndeterminate(t *testing.T) {
+func TestShouldReturnIndeterminateGivenContextCancelledDuringCreateRaceBackoff(t *testing.T) {
 	fake := &createRaceFake{}
 	a := &Secrets{C: fake, jitter: func(time.Duration) time.Duration { return 0 }, wait: func(context.Context, time.Duration) error { return context.Canceled }}
 	write := provider.Write{Environment: "MY_API_KEY", Reference: provider.Reference{Container: "secret", Key: "key"}, Value: secret.New("new")}
@@ -221,7 +222,7 @@ func TestCreateRaceCancellationDuringBackoffIsIndeterminate(t *testing.T) {
 	}
 }
 
-func TestObservedThirdPartyConflictWaitsBeforeEachRetry(t *testing.T) {
+func TestShouldReturnIndeterminateGivenPersistentThirdPartyConflict(t *testing.T) {
 	fake := &promotionFake{current: "original", promoteFailures: 4, thirdPartyConflict: true}
 	waits := 0
 	a := &Secrets{C: fake, jitter: func(time.Duration) time.Duration { return 0 }, wait: func(context.Context, time.Duration) error { waits++; return nil }}
@@ -266,7 +267,7 @@ func (f *interleavingSecrets) UpdateSecretVersionStage(_ context.Context, in *sm
 	return &sm.UpdateSecretVersionStageOutput{}, nil
 }
 
-func TestKeyedWriteRebasesOnConcurrentSiblingUpdate(t *testing.T) {
+func TestShouldRebaseGivenConcurrentSiblingUpdate(t *testing.T) {
 	fake := &interleavingSecrets{
 		currentVersion: "original",
 		currentPayload: `{"keep":"initial","target":"old"}`,
@@ -288,7 +289,7 @@ func TestKeyedWriteRebasesOnConcurrentSiblingUpdate(t *testing.T) {
 	}
 }
 
-func TestKeyedPayloadPreservesEveryUnwrittenSibling(t *testing.T) {
+func TestShouldPreserveUnwrittenSiblingsGivenKeyedWrite(t *testing.T) {
 	property := func(siblings map[string]string, replacement string) bool {
 		delete(siblings, "__uno_target__")
 		existing, err := json.Marshal(siblings)
@@ -335,7 +336,7 @@ func (f *fakeSecrets) PutSecretValue(_ context.Context, in *sm.PutSecretValueInp
 func (f *fakeSecrets) UpdateSecretVersionStage(context.Context, *sm.UpdateSecretVersionStageInput, ...func(*sm.Options)) (*sm.UpdateSecretVersionStageOutput, error) {
 	return &sm.UpdateSecretVersionStageOutput{}, nil
 }
-func TestSecretsKeyedWritePreservesSiblingsAndCreatesMissing(t *testing.T) {
+func TestShouldPreserveSiblingsWhenUpdatingAndCreateGivenMissingSecret(t *testing.T) {
 	existing := `{"keep":"yes","change":"old"}`
 	fake := &fakeSecrets{value: &existing}
 	adapter := &Secrets{C: fake}
@@ -351,7 +352,7 @@ func TestSecretsKeyedWritePreservesSiblingsAndCreatesMissing(t *testing.T) {
 		t.Fatalf("creates=%d err=%v", missing.creates, err)
 	}
 }
-func TestSecretsBlobReadWrite(t *testing.T) {
+func TestShouldReadAndWriteBlobGivenReferenceWithoutKey(t *testing.T) {
 	value := "raw"
 	fake := &fakeSecrets{value: &value}
 	adapter := &Secrets{C: fake}
@@ -369,7 +370,10 @@ func TestSecretsBlobReadWrite(t *testing.T) {
 type fakeSSM struct {
 	values map[string]string
 	names  []string
-	fail   int
+	// failContainer, if set, makes every PutParameter call for that
+	// parameter name fail permanently (simulating a non-transient error),
+	// regardless of how many times SSM.write retries it.
+	failContainer string
 }
 
 func (f *fakeSSM) GetParameter(_ context.Context, in *ssm.GetParameterInput, _ ...func(*ssm.Options)) (*ssm.GetParameterOutput, error) {
@@ -381,14 +385,19 @@ func (f *fakeSSM) GetParameter(_ context.Context, in *ssm.GetParameterInput, _ .
 }
 func (f *fakeSSM) PutParameter(_ context.Context, in *ssm.PutParameterInput, _ ...func(*ssm.Options)) (*ssm.PutParameterOutput, error) {
 	f.names = append(f.names, *in.Name)
-	if len(f.names) == f.fail {
+	if f.failContainer != "" && *in.Name == f.failContainer {
 		return nil, errors.New("remote secret leak")
 	}
 	return &ssm.PutParameterOutput{}, nil
 }
-func TestSSMExactReadAndPartialSequentialWrite(t *testing.T) {
-	fake := &fakeSSM{values: map[string]string{"/source": "value"}, fail: 2}
-	adapter := &SSM{C: fake}
+func noWait(context.Context, time.Duration) error { return nil }
+
+func TestShouldReadExactValueAndStopWriteSequenceGivenFailingParameter(t *testing.T) {
+	// A generic, unclassified error (not a recognized AWS retryable code) is
+	// permanent from the SDK's own perspective, so it must fail on the first
+	// attempt with no retries.
+	fake := &fakeSSM{values: map[string]string{"/source": "value"}, failContainer: "/b"}
+	adapter := &SSM{C: fake, wait: noWait}
 	ref := provider.Reference{Container: "/source"}
 	got, err := adapter.ReadMany(context.Background(), []provider.Reference{ref})
 	if err != nil || got[ref.Binding()].Reveal() != "value" {
@@ -399,21 +408,190 @@ func TestSSMExactReadAndPartialSequentialWrite(t *testing.T) {
 	if err == nil || len(receipt.Completed) != 1 || receipt.Completed[0] != "A" || strings.Contains(err.Error(), "leak") {
 		t.Fatalf("receipt=%#v err=%v", receipt, err)
 	}
+	if !reflect.DeepEqual(fake.names, []string{"/a", "/b"}) {
+		t.Fatalf("names=%v", fake.names)
+	}
 }
 
-func TestSSMPartialReceiptsAreDeterministicPrefixes(t *testing.T) {
+func TestShouldReturnDeterministicPrefixGivenFailingParameterPosition(t *testing.T) {
 	writes := []provider.Write{
 		{Environment: "C", Reference: provider.Reference{Container: "/c"}, Value: secret.New("c")},
 		{Environment: "A", Reference: provider.Reference{Container: "/a"}, Value: secret.New("a")},
 		{Environment: "B", Reference: provider.Reference{Container: "/b"}, Value: secret.New("b")},
 	}
-	for failure := 1; failure <= len(writes); failure++ {
-		fake := &fakeSSM{fail: failure}
-		receipt, err := (&SSM{C: fake}).WriteMany(context.Background(), append([]provider.Write(nil), writes...))
-		wantCompleted := []string{"A", "B", "C"}[:failure-1]
-		wantNames := []string{"/a", "/b", "/c"}[:failure]
+	containers := []string{"/a", "/b", "/c"}
+	environments := []string{"A", "B", "C"}
+	for i, failing := range containers {
+		fake := &fakeSSM{failContainer: failing}
+		adapter := &SSM{C: fake, wait: noWait}
+		receipt, err := adapter.WriteMany(context.Background(), append([]provider.Write(nil), writes...))
+		wantCompleted := environments[:i]
+		wantNames := containers[:i+1]
 		if err == nil || !reflect.DeepEqual(receipt.Completed, wantCompleted) || !reflect.DeepEqual(fake.names, wantNames) {
-			t.Fatalf("failure=%d completed=%v names=%v err=%v", failure, receipt.Completed, fake.names, err)
+			t.Fatalf("failing=%s completed=%v names=%v err=%v", failing, receipt.Completed, fake.names, err)
 		}
+	}
+}
+
+func TestShouldNotRetryGivenNonRetryableAWSErrorCode(t *testing.T) {
+	fake := &codedFailSSM{code: "AccessDeniedException"}
+	adapter := &SSM{C: fake, wait: noWait}
+	writes := []provider.Write{{Environment: "A", Reference: provider.Reference{Container: "/a"}, Value: secret.New("a")}}
+	receipt, err := adapter.WriteMany(context.Background(), writes)
+	if err == nil || len(receipt.Completed) != 0 {
+		t.Fatalf("receipt=%#v err=%v", receipt, err)
+	}
+	if len(fake.names) != 1 {
+		t.Fatalf("calls=%d want=1 names=%v", len(fake.names), fake.names)
+	}
+}
+
+// codedFailSSM always fails PutParameter with a smithy API error carrying a
+// specific AWS error code, so the shared aws-sdk-go-v2 retry classifier can
+// tell retryable codes (e.g. throttling) apart from permanent ones (e.g.
+// AccessDenied) exactly as it would for a real AWS response.
+type codedFailSSM struct {
+	fakeSSM
+
+	code      string
+	failCalls int // 0 means fail forever
+	putCallsN int
+}
+
+func (f *codedFailSSM) PutParameter(ctx context.Context, in *ssm.PutParameterInput, opts ...func(*ssm.Options)) (*ssm.PutParameterOutput, error) {
+	f.putCallsN++
+	if f.failCalls == 0 || f.putCallsN <= f.failCalls {
+		f.names = append(f.names, *in.Name)
+		return nil, &smithy.GenericAPIError{Code: f.code, Message: "simulated AWS error"}
+	}
+	return f.fakeSSM.PutParameter(ctx, in, opts...)
+}
+
+func TestShouldRetryWriteGivenTransientFailure(t *testing.T) {
+	fake := &codedFailSSM{code: "ThrottlingException", failCalls: maxSSMWriteAttempts - 1}
+	adapter := &SSM{C: fake, wait: noWait}
+	writes := []provider.Write{{Environment: "A", Reference: provider.Reference{Container: "/a"}, Value: secret.New("a")}}
+	receipt, err := adapter.WriteMany(context.Background(), writes)
+	if err != nil || len(receipt.Completed) != 1 || receipt.Completed[0] != "A" {
+		t.Fatalf("receipt=%#v err=%v", receipt, err)
+	}
+	if len(fake.names) != maxSSMWriteAttempts {
+		t.Fatalf("calls=%d want=%d names=%v", len(fake.names), maxSSMWriteAttempts, fake.names)
+	}
+}
+
+func TestShouldExhaustRetryBudgetGivenPersistentTransientFailure(t *testing.T) {
+	fake := &codedFailSSM{code: "ThrottlingException"} // fails every call
+	adapter := &SSM{C: fake, wait: noWait}
+	writes := []provider.Write{{Environment: "A", Reference: provider.Reference{Container: "/a"}, Value: secret.New("a")}}
+	receipt, err := adapter.WriteMany(context.Background(), writes)
+	if err == nil || len(receipt.Completed) != 0 {
+		t.Fatalf("receipt=%#v err=%v", receipt, err)
+	}
+	if len(fake.names) != maxSSMWriteAttempts {
+		t.Fatalf("calls=%d want=%d names=%v", len(fake.names), maxSSMWriteAttempts, fake.names)
+	}
+}
+
+// rollbackFake serves GetSecretValue keyed by the requested VersionStage,
+// letting AWSCURRENT and AWSPREVIOUS resolve to independently controlled
+// version IDs, and records the UpdateSecretVersionStage call Rollback makes.
+type rollbackFake struct {
+	current, previous *string
+	promoted          *sm.UpdateSecretVersionStageInput
+	updateErr         error
+}
+
+func (f *rollbackFake) GetSecretValue(_ context.Context, in *sm.GetSecretValueInput, _ ...func(*sm.Options)) (*sm.GetSecretValueOutput, error) {
+	var id *string
+	switch *in.VersionStage {
+	case "AWSCURRENT":
+		id = f.current
+	case "AWSPREVIOUS":
+		id = f.previous
+	}
+	if id == nil {
+		return nil, &smtypes.ResourceNotFoundException{}
+	}
+	return &sm.GetSecretValueOutput{VersionId: id}, nil
+}
+func (f *rollbackFake) CreateSecret(context.Context, *sm.CreateSecretInput, ...func(*sm.Options)) (*sm.CreateSecretOutput, error) {
+	return nil, errors.New("unexpected CreateSecret call")
+}
+func (f *rollbackFake) PutSecretValue(context.Context, *sm.PutSecretValueInput, ...func(*sm.Options)) (*sm.PutSecretValueOutput, error) {
+	return nil, errors.New("unexpected PutSecretValue call")
+}
+func (f *rollbackFake) UpdateSecretVersionStage(_ context.Context, in *sm.UpdateSecretVersionStageInput, _ ...func(*sm.Options)) (*sm.UpdateSecretVersionStageOutput, error) {
+	f.promoted = in
+	if f.updateErr != nil {
+		return nil, f.updateErr
+	}
+	return &sm.UpdateSecretVersionStageOutput{}, nil
+}
+
+func TestShouldPromoteAWSPreviousToCurrentGivenDistinctVersions(t *testing.T) {
+	current, previous := "v2", "v1"
+	fake := &rollbackFake{current: &current, previous: &previous}
+	err := (&Secrets{C: fake}).Rollback(context.Background(), provider.Reference{Container: "secret"})
+	if err != nil || fake.promoted == nil || *fake.promoted.VersionStage != "AWSCURRENT" ||
+		*fake.promoted.MoveToVersionId != previous || *fake.promoted.RemoveFromVersionId != current {
+		t.Fatalf("promoted=%#v err=%v", fake.promoted, err)
+	}
+}
+
+func TestShouldFailRollbackGivenNoDistinctPreviousVersion(t *testing.T) {
+	same := "v1"
+	fake := &rollbackFake{current: &same, previous: &same}
+	err := (&Secrets{C: fake}).Rollback(context.Background(), provider.Reference{Container: "secret"})
+	var typed *provider.Error
+	if !errors.As(err, &typed) || typed.Kind != provider.InvalidState || fake.promoted != nil {
+		t.Fatalf("err=%v promoted=%v", err, fake.promoted)
+	}
+}
+
+func TestShouldFailRollbackGivenNoPreviousVersionStage(t *testing.T) {
+	current := "v1"
+	fake := &rollbackFake{current: &current}
+	err := (&Secrets{C: fake}).Rollback(context.Background(), provider.Reference{Container: "secret"})
+	if err == nil || fake.promoted != nil {
+		t.Fatalf("err=%v promoted=%v", err, fake.promoted)
+	}
+}
+
+// ssmRollbackFake keys parameter values by exact requested Name, including
+// the ":version" selector suffix, so a rollback's two GetParameter calls
+// (current, then current-1) resolve independently.
+type ssmRollbackFake struct {
+	values  map[string]string
+	version int64
+	put     *ssm.PutParameterInput
+}
+
+func (f *ssmRollbackFake) GetParameter(_ context.Context, in *ssm.GetParameterInput, _ ...func(*ssm.Options)) (*ssm.GetParameterOutput, error) {
+	value, ok := f.values[*in.Name]
+	if !ok {
+		return nil, &ssmtypes.ParameterNotFound{}
+	}
+	return &ssm.GetParameterOutput{Parameter: &ssmtypes.Parameter{Value: &value, Version: f.version, Type: ssmtypes.ParameterTypeSecureString}}, nil
+}
+func (f *ssmRollbackFake) PutParameter(_ context.Context, in *ssm.PutParameterInput, _ ...func(*ssm.Options)) (*ssm.PutParameterOutput, error) {
+	f.put = in
+	return &ssm.PutParameterOutput{}, nil
+}
+
+func TestShouldRewritePreviousParameterVersionGivenRollback(t *testing.T) {
+	fake := &ssmRollbackFake{values: map[string]string{"/p": "new", "/p:1": "old"}, version: 2}
+	err := (&SSM{C: fake}).Rollback(context.Background(), provider.Reference{Container: "/p"})
+	if err != nil || fake.put == nil || *fake.put.Value != "old" || *fake.put.Name != "/p" {
+		t.Fatalf("put=%#v err=%v", fake.put, err)
+	}
+}
+
+func TestShouldFailRollbackGivenParameterHasOnlyOneVersion(t *testing.T) {
+	fake := &ssmRollbackFake{values: map[string]string{"/p": "new"}, version: 1}
+	err := (&SSM{C: fake}).Rollback(context.Background(), provider.Reference{Container: "/p"})
+	var typed *provider.Error
+	if !errors.As(err, &typed) || typed.Kind != provider.InvalidState || fake.put != nil {
+		t.Fatalf("err=%v put=%#v", err, fake.put)
 	}
 }

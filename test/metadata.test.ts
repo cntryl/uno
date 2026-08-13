@@ -9,7 +9,7 @@ const packageJson = JSON.parse(
 ) as Record<string, unknown>;
 
 describe('package metadata', () => {
-  test('publishes one built launcher from the root package', () => {
+  test('should publish a single built launcher with no lifecycle scripts given the root package.json fields', () => {
     expect(packageJson.name).toBe('@cntryl/uno');
     expect(packageJson.private).toBeUndefined();
     expect(packageJson.workspaces).toBeUndefined();
@@ -31,7 +31,7 @@ describe('package metadata', () => {
     }
   });
 
-  test('keeps the Go and npm release versions aligned', () => {
+  test('should keep the go and npm release versions aligned given main.go and package.json', () => {
     const source = readFileSync(path.join(repositoryRoot, 'cmd/uno/main.go'), 'utf8');
     const goVersion = source.match(/^const version = "([^"]+)"$/m)?.[1];
     expect(goVersion).toBe(packageJson.version);

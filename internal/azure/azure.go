@@ -1,0 +1,204 @@
+package azure
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"sort"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets"
+	"github.com/cntryl/uno/internal/core/provider"
+	"github.com/cntryl/uno/internal/core/secret"
+)
+
+type Client interface {
+	GetSecret(context.Context, string, string) (azsecrets.GetSecretResponse, error)
+	SetSecret(context.Context, string, azsecrets.SetSecretParameters) (azsecrets.SetSecretResponse, error)
+	ListSecretVersions(context.Context, string) ([]azsecrets.SecretProperties, error)
+}
+
+type sdkClient struct{ client *azsecrets.Client }
+
+func (s *sdkClient) GetSecret(ctx context.Context, name, version string) (azsecrets.GetSecretResponse, error) {
+	return s.client.GetSecret(ctx, name, version, nil)
+}
+func (s *sdkClient) SetSecret(ctx context.Context, name string, params azsecrets.SetSecretParameters) (azsecrets.SetSecretResponse, error) {
+	return s.client.SetSecret(ctx, name, params, nil)
+}
+func (s *sdkClient) ListSecretVersions(ctx context.Context, name string) ([]azsecrets.SecretProperties, error) {
+	pager := s.client.NewListSecretPropertiesVersionsPager(name, nil)
+	var out []azsecrets.SecretProperties
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, properties := range page.Value {
+			if properties != nil {
+				out = append(out, *properties)
+			}
+		}
+	}
+	return out, nil
+}
+
+type KeyVault struct{ C Client }
+
+func (a *KeyVault) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]secret.Value, error) {
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	response, err := a.C.GetSecret(ctx, refs[0].Container, "")
+	if err != nil {
+		return nil, remoteError(err)
+	}
+	if response.Value == nil {
+		return nil, &provider.Error{Kind: provider.InvalidState}
+	}
+	values := make(map[string]secret.Value, len(refs))
+	fail := func(err error) (map[string]secret.Value, error) { secret.DestroyMap(values); return nil, err }
+	var doc map[string]json.RawMessage
+	parsed := false
+	for _, ref := range refs {
+		if ref.Region != refs[0].Region || ref.Container != refs[0].Container {
+			return fail(&provider.Error{Kind: provider.InvalidBinding})
+		}
+		if ref.Blob() {
+			values[ref.Binding()] = secret.New(*response.Value)
+			continue
+		}
+		if !parsed {
+			if json.Unmarshal([]byte(*response.Value), &doc) != nil || doc == nil {
+				return fail(&provider.Error{Kind: provider.InvalidState})
+			}
+			parsed = true
+		}
+		raw, ok := doc[ref.Key]
+		if !ok || string(raw) == "null" {
+			return fail(&provider.Error{Kind: provider.InvalidBinding})
+		}
+		var value string
+		if json.Unmarshal(raw, &value) != nil {
+			return fail(&provider.Error{Kind: provider.InvalidState})
+		}
+		values[ref.Binding()] = secret.New(value)
+	}
+	return values, nil
+}
+
+func (a *KeyVault) WriteMany(ctx context.Context, writes []provider.Write) (provider.Receipt, error) {
+	if len(writes) == 0 {
+		return provider.Receipt{}, nil
+	}
+	ref := writes[0].Reference
+	for _, write := range writes {
+		if write.Reference.Region != ref.Region || write.Reference.Container != ref.Container || write.Reference.Blob() != ref.Blob() {
+			return provider.Receipt{}, &provider.Error{Kind: provider.InvalidBinding}
+		}
+	}
+	params := azsecrets.SetSecretParameters{}
+	if ref.Blob() {
+		value := writes[0].Value.Reveal()
+		params.Value = &value
+	} else {
+		doc := map[string]json.RawMessage{}
+		current, err := a.C.GetSecret(ctx, ref.Container, "")
+		if err == nil {
+			if current.Value == nil || json.Unmarshal([]byte(*current.Value), &doc) != nil || doc == nil {
+				return provider.Receipt{}, &provider.Error{Kind: provider.InvalidState}
+			}
+			params.ContentType = current.ContentType
+			params.Tags = current.Tags
+			params.SecretAttributes = current.Attributes
+		} else if !statusCode(err, 404) {
+			return provider.Receipt{}, remoteError(err)
+		}
+		for _, write := range writes {
+			encoded, err := json.Marshal(write.Value.Reveal())
+			if err != nil {
+				return provider.Receipt{}, &provider.Error{Kind: provider.InvalidState}
+			}
+			doc[write.Reference.Key] = encoded
+		}
+		encoded, err := json.Marshal(doc)
+		if err != nil {
+			return provider.Receipt{}, &provider.Error{Kind: provider.InvalidState}
+		}
+		value := string(encoded)
+		params.Value = &value
+	}
+	if params.Value == nil {
+		return provider.Receipt{}, &provider.Error{Kind: provider.InvalidState}
+	}
+	if _, err := a.C.SetSecret(ctx, ref.Container, params); err != nil {
+		return provider.Receipt{}, remoteError(err)
+	}
+	return provider.Receipt{Completed: provider.Environments(writes)}, nil
+}
+
+func (a *KeyVault) Rollback(ctx context.Context, ref provider.Reference) error {
+	versions, err := a.C.ListSecretVersions(ctx, ref.Container)
+	if err != nil {
+		return remoteError(err)
+	}
+	usable := make([]azsecrets.SecretProperties, 0, len(versions))
+	for _, version := range versions {
+		if version.ID == nil || version.ID.Version() == "" || version.Attributes == nil || version.Attributes.Created == nil {
+			// Without a complete ordering key we cannot prove which version is
+			// immediately prior. Failing closed avoids silently skipping it.
+			return &provider.Error{Kind: provider.InvalidState}
+		}
+		usable = append(usable, version)
+	}
+	if len(usable) < 2 {
+		return &provider.Error{Kind: provider.InvalidState, Detail: "no previous version to roll back to"}
+	}
+	sort.Slice(usable, func(i, j int) bool {
+		a, b := usable[i], usable[j]
+		if !a.Attributes.Created.Equal(*b.Attributes.Created) {
+			return a.Attributes.Created.Before(*b.Attributes.Created)
+		}
+		return a.ID.Version() < b.ID.Version()
+	})
+	previous := usable[len(usable)-2]
+	response, err := a.C.GetSecret(ctx, ref.Container, previous.ID.Version())
+	if err != nil {
+		return remoteError(err)
+	}
+	if response.Value == nil {
+		return &provider.Error{Kind: provider.InvalidState}
+	}
+	params := azsecrets.SetSecretParameters{Value: response.Value, ContentType: response.ContentType, Tags: response.Tags, SecretAttributes: response.Attributes}
+	if _, err := a.C.SetSecret(ctx, ref.Container, params); err != nil {
+		return remoteError(err)
+	}
+	return nil
+}
+
+func statusCode(err error, code int) bool {
+	var response *azcore.ResponseError
+	return errors.As(err, &response) && response.StatusCode == code
+}
+func remoteError(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	var response *azcore.ResponseError
+	if !errors.As(err, &response) {
+		return &provider.Error{Kind: provider.Indeterminate}
+	}
+	switch response.StatusCode {
+	case http.StatusUnauthorized:
+		return &provider.Error{Kind: provider.Authentication}
+	case http.StatusForbidden:
+		return &provider.Error{Kind: provider.AccessDenied}
+	case http.StatusNotFound:
+		return &provider.Error{Kind: provider.InvalidBinding}
+	case http.StatusBadRequest, http.StatusConflict, http.StatusGone, http.StatusPreconditionFailed, http.StatusUnprocessableEntity:
+		return &provider.Error{Kind: provider.InvalidState}
+	default:
+		return &provider.Error{Kind: provider.Indeterminate}
+	}
+}

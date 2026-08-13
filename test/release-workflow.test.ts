@@ -5,17 +5,17 @@ import { describe, expect, test } from 'vite-plus/test';
 const workflow = readFileSync('.github/workflows/publish.yml', 'utf8');
 
 describe('release artifact integrity', () => {
-  test('grants OIDC only to jobs that need it', () => {
+  test('should use one environment-protected release job with the required permissions given the release workflow file', () => {
     expect(workflow).toMatch(
-      /build:\n[\s\S]*?permissions:\n      contents: read\n      id-token: write/,
+      /release:\n    needs: ci\n    runs-on: ubuntu-latest\n    environment: npm\n    permissions:\n      contents: write\n      id-token: write/,
     );
-    expect(workflow).toMatch(/publish:\n[\s\S]*?permissions:\n      id-token: write/);
+    expect(workflow).not.toMatch(/^  build:/m);
+    expect(workflow).not.toMatch(/^  tag:/m);
+    expect(workflow).not.toMatch(/^  publish:/m);
   });
 
-  test('signs every native binary and generates a CycloneDX SBOM', () => {
-    expect(workflow).toContain(
-      'sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6',
-    );
+  test('should sign every native binary and generate a cyclonedx sbom given the release workflow file', () => {
+    expect(workflow).toContain('sigstore/cosign-installer@v4.1.2');
     expect(workflow).toContain('cyclonedx-gomod@v1.10.0');
     expect(workflow).toContain('cosign sign-blob --yes --bundle');
     expect(workflow).toContain(
@@ -23,7 +23,7 @@ describe('release artifact integrity', () => {
     );
   });
 
-  test('verifies checksums, SBOM format, signer identity, and issuer before publish', () => {
+  test('should verify checksums, sbom format, signer identity, and oidc issuer before publishing given the release workflow file', () => {
     const checksum = workflow.indexOf('sha256sum --check release/SHA256SUMS');
     const sbom = workflow.indexOf(`jq -e '.bomFormat == "CycloneDX"'`);
     const signature = workflow.indexOf('cosign verify-blob');

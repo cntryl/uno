@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestCheckRequiresFinalGitignoreRule(t *testing.T) {
+func TestShouldFailGivenLaterGitignoreRuleUnprotectsSecretPattern(t *testing.T) {
 	directory := t.TempDir()
 	initGit(t, directory)
 	write(t, directory, ".gitignore", ".env.secrets*\n")
@@ -21,7 +21,7 @@ func TestCheckRequiresFinalGitignoreRule(t *testing.T) {
 	}
 }
 
-func TestCheckRequiresDockerignoreForDockerfileVariants(t *testing.T) {
+func TestShouldFailGivenDockerfileMissingMatchingDockerignoreEntry(t *testing.T) {
 	directory := t.TempDir()
 	initGit(t, directory)
 	write(t, directory, ".gitignore", ".env.secrets*\n")
@@ -46,7 +46,7 @@ func TestCheckRequiresDockerignoreForDockerfileVariants(t *testing.T) {
 	}
 }
 
-func TestCheckRequiresGitOnPath(t *testing.T) {
+func TestShouldFailGivenGitNotOnPath(t *testing.T) {
 	directory := t.TempDir()
 	t.Setenv("PATH", "")
 

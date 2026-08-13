@@ -82,6 +82,17 @@ type Factory interface {
 	Adapter(context.Context, Reference) (Adapter, error)
 }
 type capabilityFactory interface{ CapabilityPrefixes() []string }
+
+// Rollbacker is an optional adapter capability. An adapter that can revert a
+// container to its previous value implements it; callers must type-assert
+// since not every provider (or every reference kind) supports this — an
+// adapter that doesn't implement it simply doesn't offer rollback.
+type Rollbacker interface {
+	// Rollback reverts ref's container to its previous value. It returns an
+	// *Error (InvalidState is conventional) if there is no distinct previous
+	// value to revert to.
+	Rollback(ctx context.Context, ref Reference) error
+}
 type Registry struct{ factories map[string]Factory }
 
 func NewRegistry() *Registry                          { return &Registry{factories: map[string]Factory{}} }

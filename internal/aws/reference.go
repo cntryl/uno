@@ -79,7 +79,11 @@ func parseParameter(raw string) (provider.Reference, error) {
 	if separator <= 0 || separator == len(raw)-1 {
 		return invalidReference("SSM reference requires region/parameter-path")
 	}
-	return provider.Reference{Scheme: "aws-ssm", Region: raw[:separator], Container: "/" + strings.TrimLeft(raw[separator+1:], "/"), AdapterKey: "ssm\x00" + raw[:separator]}, nil
+	path := strings.TrimLeft(raw[separator+1:], "/")
+	if path == "" {
+		return invalidReference("SSM reference requires region/parameter-path")
+	}
+	return provider.Reference{Scheme: "aws-ssm", Region: raw[:separator], Container: "/" + path, AdapterKey: "ssm\x00" + raw[:separator]}, nil
 }
 
 func invalidReference(detail string) (provider.Reference, error) {

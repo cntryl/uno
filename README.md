@@ -38,14 +38,55 @@ Follow this sequence unless the user explicitly requests something else:
 
 4. Choose exactly one execution command:
 
-   | Intent                                | Command                              | Writes remote providers | Writes a local file |
-   | ------------------------------------- | ------------------------------------ | ----------------------- | ------------------- |
-   | Copy sources to destinations          | `npx uno sync`                       | Yes                     | No                  |
-   | Create a development dotenv file      | `npx uno dev`                        | No                      | `.env.secrets`      |
-   | Inject secrets into one child process | `npx uno run -- <command> [args...]` | No                      | No                  |
+   | Intent                                   | Command                              | Writes remote providers | Writes a local file |
+   | ---------------------------------------- | ------------------------------------ | ----------------------- | ------------------- |
+   | Copy sources to destinations             | `npx uno sync`                       | Yes (only what changed) | No                  |
+   | Create a development dotenv file         | `npx uno dev`                        | No                      | `.env.secrets`      |
+   | Inject secrets into one child process    | `npx uno run -- <command> [args...]` | No                      | No                  |
+   | Revert destinations to their prior value | `npx uno rollback`                   | Yes (where supported)   | No                  |
 
 Only `sync` writes destination providers. Do not run it merely to validate a
 template. `uno` resolves every source before the first destination write.
+
+`sync` diffs each destination's current value against the resolved source
+before writing: a destination that already matches is skipped entirely (no
+API call, no secret-version churn); one that doesn't exist yet or differs is
+a _pending change_. Writing a pending change requires either an interactive
+confirmation or `--force` — **in a non-interactive/agent/CI context, pass
+`--force` explicitly**, or `sync` refuses with an error rather than hanging
+on a prompt. Add `--json` for machine-readable output
+(`{"changes": [...], "completed": [...], "unchanged": N}`).
+
+```sh
+npx uno sync --force        # non-interactive: write every pending change
+npx uno sync --force --json # same, as structured output for scripts
+```
+
+`rollback` reverts every mapping's destination to its previous provider-side
+value, one call per distinct container. Support is provider-specific and
+reported per mapping rather than assumed:
+
+- **AWS Secrets Manager**: moves `AWSCURRENT` back to `AWSPREVIOUS` — an
+  exact, idempotent-to-attempt revert. Fails if there is no distinct previous
+  version.
+- **AWS SSM**: Parameter Store has no movable "current" pointer, so this
+  writes the one-version-back value again as a new version. It is
+  best-effort: rolling back twice in a row does not return to the value from
+  three writes ago.
+- **Azure Key Vault**: copies the immediately prior version's value and
+  mutable metadata into a new version. This is best-effort because Key Vault
+  has no movable "current" pointer. Rollback requires `get`, `set`, and
+  `list` secret permissions.
+- **1Password**: not supported yet. Mappings targeting it are reported
+  `unsupported`, not silently skipped.
+
+Like `sync`, `rollback` requires `--force` in a non-interactive context and
+supports `--json`:
+
+```sh
+npx uno rollback --force        # non-interactive
+npx uno rollback --force --json # {"results":[{"environment":"...","status":"reverted"|"unsupported"|"failed", ...}]}
+```
 
 ## Template contract
 
@@ -142,6 +183,55 @@ aws-ssm://region/full/parameter/path
 
 This addresses one exact `SecureString`. Writes are deterministic and
 sequential; a failure reports mappings completed before the failure.
+
+### HashiCorp Vault (KV v2)
+
+```text
+vault://mount/path/to/secret/key
+```
+
+The mount is the KV v2 engine's mount point (e.g. `secret`); everything
+between it and the final segment is the (possibly multi-segment) secret
+path; the last segment is the field name. Uses the standard `VAULT_ADDR` and
+`VAULT_TOKEN` environment variables. Writes merge into the existing document
+and use the KV v2 engine's native check-and-set option, retried on conflict.
+
+### GCP Secret Manager
+
+```text
+gcp-secret-manager://project/secret-name
+gcp-secret-manager://project/secret-name/key
+```
+
+Uses Application Default Credentials (`GOOGLE_APPLICATION_CREDENTIALS`, a
+service account attached to the runtime, or `gcloud auth
+application-default login`). A blob reference addresses the raw secret
+payload; a keyed reference addresses one top-level JSON field and preserves
+siblings. Missing destination secrets are created. Unlike AWS Secrets
+Manager and Vault, the stable API has no compare-and-swap primitive for
+writes — a racing concurrent writer can still clobber a merge.
+
+### Azure Key Vault
+
+```text
+azure-key-vault://myvault.vault.azure.net/secret-name
+azure-key-vault://myvault.vault.azure.net/secret-name/key
+```
+
+References require the full canonical vault hostname. Public Azure
+(`vault.azure.net`), US Government (`vault.usgovcloudapi.net`), China
+(`vault.azure.cn`), and Germany (`vault.microsoftazure.de`) domains are
+accepted. Authentication uses `DefaultAzureCredential`; the identity needs
+`get` and `set` secret permissions, plus `list` for rollback.
+
+A blob reference reads or writes the whole value. A keyed reference treats
+the latest value as a top-level JSON object, preserves sibling properties,
+and preserves content type, tags, enabled state, not-before, and expiry when
+creating the replacement version. A missing destination secret starts as an
+empty JSON object. Azure Key Vault has no conditional value-write primitive,
+so concurrent keyed read-modify-write operations can lose an intervening
+sibling update. Uno does not retry an ambiguous `SetSecret` failure because
+that could create duplicate versions.
 
 ## Repository development
 

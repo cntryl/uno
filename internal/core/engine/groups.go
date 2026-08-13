@@ -14,13 +14,17 @@ type sourceGroup struct {
 	mappings  []Mapping
 }
 
-func groupSources(mappings []Mapping) []sourceGroup {
+// groupByReference groups mappings by the container that selector picks out
+// of each one (Source or Destination), sorted by container key for
+// deterministic iteration order.
+func groupByReference(mappings []Mapping, selector func(Mapping) provider.Reference) []sourceGroup {
 	byContainer := make(map[string]*sourceGroup)
 	keys := make([]string, 0)
 	for _, mapping := range mappings {
-		key := containerKey(mapping.Source)
+		ref := selector(mapping)
+		key := containerKey(ref)
 		if byContainer[key] == nil {
-			byContainer[key] = &sourceGroup{reference: mapping.Source}
+			byContainer[key] = &sourceGroup{reference: ref}
 			keys = append(keys, key)
 		}
 		byContainer[key].mappings = append(byContainer[key].mappings, mapping)
@@ -31,6 +35,14 @@ func groupSources(mappings []Mapping) []sourceGroup {
 		groups = append(groups, *byContainer[key])
 	}
 	return groups
+}
+
+func groupSources(mappings []Mapping) []sourceGroup {
+	return groupByReference(mappings, func(m Mapping) provider.Reference { return m.Source })
+}
+
+func groupDestinationContainers(mappings []Mapping) []sourceGroup {
+	return groupByReference(mappings, func(m Mapping) provider.Reference { return m.Destination })
 }
 
 type destinationGroup struct {
@@ -63,31 +75,43 @@ func groupDestinations(mappings []Mapping, values map[string]secret.Value) []des
 	return groups
 }
 
+type adapterEntry struct {
+	once    sync.Once
+	adapter provider.Adapter
+	err     error
+}
+
 type adapterCache struct {
 	registry *provider.Registry
-	values   map[string]provider.Adapter
+	entries  map[string]*adapterEntry
 	mu       sync.Mutex
 }
 
 func newAdapterCache(registry *provider.Registry) *adapterCache {
-	return &adapterCache{registry: registry, values: make(map[string]provider.Adapter)}
+	return &adapterCache{registry: registry, entries: make(map[string]*adapterEntry)}
 }
 
+// get builds the adapter for ref's key at most once, but never holds the
+// cache's mutex while the (network-bound) registry.Adapter call runs, so
+// unrelated provider/region groups can be built concurrently instead of
+// serializing on one lock.
 func (c *adapterCache) get(ctx context.Context, ref provider.Reference) (provider.Adapter, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	key := ref.AdapterKey
 	if key == "" {
 		key = ref.Scheme + "\x00" + ref.Region
 	}
-	if adapter := c.values[key]; adapter != nil {
-		return adapter, nil
+	c.mu.Lock()
+	entry := c.entries[key]
+	if entry == nil {
+		entry = &adapterEntry{}
+		c.entries[key] = entry
 	}
-	adapter, err := c.registry.Adapter(ctx, ref)
-	if err == nil {
-		c.values[key] = adapter
-	}
-	return adapter, err
+	c.mu.Unlock()
+
+	entry.once.Do(func() {
+		entry.adapter, entry.err = c.registry.Adapter(ctx, ref)
+	})
+	return entry.adapter, entry.err
 }
 
 func containerKey(ref provider.Reference) string {

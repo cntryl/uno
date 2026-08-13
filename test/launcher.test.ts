@@ -9,7 +9,7 @@ import { resolveBinary, runBinary } from '../src/launcher.js';
 import { LauncherError } from '../src/platform.js';
 
 describe('resolveBinary', () => {
-  test('reports a bundled platform binary that is missing', () => {
+  test('should throw a LauncherError given a platform binary that does not exist on disk', () => {
     expect(() =>
       resolveBinary({
         platform: 'darwin',
@@ -21,7 +21,7 @@ describe('resolveBinary', () => {
     );
   });
 
-  test('selects a bundled platform binary', () => {
+  test('should return the platform binary path given a bundled binary that exists on disk', () => {
     expect(
       resolveBinary({
         platform: 'linux',
@@ -34,7 +34,7 @@ describe('resolveBinary', () => {
 });
 
 describe('runBinary', () => {
-  test('directly spawns without a shell and returns the child exit code', () => {
+  test('should spawn without a shell and return the child exit code given arguments containing shell metacharacters', () => {
     const spawn = vi.fn(() => ({ error: undefined, signal: null, status: 23 }));
     const args = ['publish', '--label', 'value with spaces', '$(not-a-command)'];
 
@@ -45,7 +45,7 @@ describe('runBinary', () => {
     });
   });
 
-  test('preserves argv with a real child process', () => {
+  test('should preserve argv exactly given arguments with spaces and shell metacharacters when spawned as a real child process', () => {
     const directory = mkdtempSync(path.join(tmpdir(), 'uno-launcher-'));
     const outputPath = path.join(directory, 'argv.json');
     const fixturePath = path.join(directory, 'capture-argv.cjs');
@@ -57,5 +57,29 @@ describe('runBinary', () => {
 
     expect(runBinary(process.execPath, [fixturePath, outputPath, '17', ...args])).toBe(17);
     expect(JSON.parse(readFileSync(outputPath, 'utf8'))).toEqual(args);
+  });
+
+  test('should return 128+signal-number given a child killed by SIGINT when computing the exit code', () => {
+    const spawn = vi.fn(() => ({ error: undefined, signal: 'SIGINT' as const, status: null }));
+
+    expect(runBinary('/tmp/uno', [], { spawn })).toBe(130);
+  });
+
+  test('should return 128+signal-number given a child killed by SIGTERM when computing the exit code', () => {
+    const spawn = vi.fn(() => ({ error: undefined, signal: 'SIGTERM' as const, status: null }));
+
+    expect(runBinary('/tmp/uno', [], { spawn })).toBe(143);
+  });
+
+  test('should throw a LauncherError given an unrecognized signal name when computing the exit code', () => {
+    const spawn = vi.fn(() => ({
+      error: undefined,
+      signal: 'SIGNOTREAL' as unknown as NodeJS.Signals,
+      status: null,
+    }));
+
+    expect(() => runBinary('/tmp/uno', [], { spawn })).toThrowError(
+      expect.objectContaining<Partial<LauncherError>>({ code: 'CHILD_SIGNAL' }),
+    );
   });
 });

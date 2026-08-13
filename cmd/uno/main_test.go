@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -15,11 +16,21 @@ import (
 	"github.com/cntryl/uno/internal/core/secret"
 )
 
-func TestSafeChildEnvironmentStripsProviderCapabilities(t *testing.T) {
-	got := safeChildEnvironment([]string{"PATH=/bin", "AWS_REGION=us-east-1", "Aws_Access_Key_Id=mixed-secret", "op_service_account_token=mixed-token", "AWS_PROFILE=admin", "AWS_SECRET_ACCESS_KEY=secret", "AWS_FOO_BAR=x", "OP_SERVICE_ACCOUNT_TOKEN=token", "ORDINARY=value"}, registry().CapabilityPrefixes())
+func TestShouldStripProviderCredentialsGivenMixedCaseEnvironment(t *testing.T) {
+	got := safeChildEnvironment([]string{"PATH=/bin", "AWS_REGION=us-east-1", "Aws_Access_Key_Id=mixed-secret", "op_service_account_token=mixed-token", "AWS_PROFILE=admin", "AWS_SECRET_ACCESS_KEY=secret", "AWS_FOO_BAR=x", "OP_SERVICE_ACCOUNT_TOKEN=token", "AZURE_CLIENT_SECRET=secret", "Azure_Tenant_Id=mixed-secret", "ORDINARY=value"}, registry().CapabilityPrefixes())
 	joined := strings.Join(got, "\n")
-	if !strings.Contains(joined, "PATH=/bin") || !strings.Contains(joined, "ORDINARY=value") || strings.Contains(strings.ToUpper(joined), "AWS_") || strings.Contains(strings.ToUpper(joined), "OP_") || strings.Contains(joined, "secret") || strings.Contains(joined, "token") {
+	if !strings.Contains(joined, "PATH=/bin") || !strings.Contains(joined, "ORDINARY=value") || strings.Contains(strings.ToUpper(joined), "AWS_") || strings.Contains(strings.ToUpper(joined), "OP_") || strings.Contains(strings.ToUpper(joined), "AZURE_") || strings.Contains(joined, "secret") || strings.Contains(joined, "token") {
 		t.Fatalf("unsafe child environment: %v", got)
+	}
+}
+
+func TestRegistryBindsAzureKeyVaultReference(t *testing.T) {
+	ref, err := registry().Parse("azure-key-vault://myvault.vault.azure.net/MY-SECRET/MY_API_KEY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref.Region != "myvault.vault.azure.net" || ref.Container != "MY-SECRET" || ref.Key != "MY_API_KEY" {
+		t.Fatalf("ref=%+v", ref)
 	}
 }
 
@@ -34,15 +45,28 @@ func (f cliFactory) Adapter(context.Context, provider.Reference) (provider.Adapt
 }
 
 type cliAdapter struct {
-	accesses, reads, writes int
-	value                   string
-	read                    func(context.Context, []provider.Reference) (map[string]secret.Value, error)
-	write                   func(context.Context, []provider.Write) (provider.Receipt, error)
+	accesses, reads, writes, readCalls int
+	value                              string
+	read                               func(context.Context, []provider.Reference) (map[string]secret.Value, error)
+	write                              func(context.Context, []provider.Write) (provider.Receipt, error)
 }
 
+// ReadMany's default (no read hook) behavior models a fresh destination:
+// this test harness reuses one adapter for both the source and destination
+// side of a mapping (cliFactory.Parse ignores its input), so the engine's
+// source-resolve call and its destination-diff call land on the exact same
+// method. The first call succeeds, standing in for "read the source"; every
+// call after that reports the binding as not-yet-existing, standing in for
+// "this destination hasn't been written before" — which is the common case
+// for a first sync, and keeps every pre-existing test's "the write step
+// gets attempted" assumption true without each needing to seed a fake store.
 func (a *cliAdapter) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]secret.Value, error) {
 	if a.read != nil {
 		return a.read(ctx, refs)
+	}
+	a.readCalls++
+	if a.readCalls > 1 {
+		return nil, &provider.Error{Kind: provider.InvalidBinding}
 	}
 	out := make(map[string]secret.Value, len(refs))
 	for _, r := range refs {
@@ -56,7 +80,7 @@ func (a *cliAdapter) ReadMany(ctx context.Context, refs []provider.Reference) (m
 	return out, nil
 }
 
-func TestTimeoutRejectsNonPositiveDurations(t *testing.T) {
+func TestShouldReturnInvalidArgumentsErrorGivenNonPositiveTimeout(t *testing.T) {
 	path := templateFile(t)
 	for _, duration := range []string{"0s", "-1s", "invalid"} {
 		_, err := executeWithRegistry(context.Background(), []string{"--template", path, "--timeout", duration, "check"}, cliRegistry(&cliAdapter{}))
@@ -66,7 +90,7 @@ func TestTimeoutRejectsNonPositiveDurations(t *testing.T) {
 	}
 }
 
-func TestBlockingProviderIsCanceledAndTimeoutIsRedacted(t *testing.T) {
+func TestShouldReturnRedactedTimeoutErrorGivenBlockingProvider(t *testing.T) {
 	adapter := &cliAdapter{read: func(ctx context.Context, _ []provider.Reference) (map[string]secret.Value, error) {
 		<-ctx.Done()
 		return nil, errors.New("remote provider leaked text")
@@ -78,7 +102,7 @@ func TestBlockingProviderIsCanceledAndTimeoutIsRedacted(t *testing.T) {
 	}
 }
 
-func TestRunChildOutlivesProviderTimeout(t *testing.T) {
+func TestShouldCompleteChildProcessGivenProviderTimeoutExpiresDuringRun(t *testing.T) {
 	adapter := &cliAdapter{}
 	path := templateFile(t)
 	code, err := executeWithRegistry(context.Background(), []string{"--template", path, "--timeout", "1ms", "run", "--", "/bin/sh", "-c", "sleep 0.03; test \"$VALUE\" = resolved"}, cliRegistry(adapter))
@@ -87,7 +111,7 @@ func TestRunChildOutlivesProviderTimeout(t *testing.T) {
 	}
 }
 
-func TestCustomTimeoutReachesProviderContext(t *testing.T) {
+func TestShouldPropagateTimeoutToProviderContextGivenCustomTimeoutFlag(t *testing.T) {
 	adapter := &cliAdapter{read: func(ctx context.Context, refs []provider.Reference) (map[string]secret.Value, error) {
 		deadline, ok := ctx.Deadline()
 		if !ok || time.Until(deadline) > 3*time.Second || time.Until(deadline) < time.Second {
@@ -105,7 +129,7 @@ func TestCustomTimeoutReachesProviderContext(t *testing.T) {
 	}
 }
 
-func TestDefaultTimeoutReachesProviderContext(t *testing.T) {
+func TestShouldPropagateDefaultTimeoutToProviderContextGivenNoTimeoutFlag(t *testing.T) {
 	adapter := &cliAdapter{read: func(ctx context.Context, refs []provider.Reference) (map[string]secret.Value, error) {
 		deadline, ok := ctx.Deadline()
 		remaining := time.Until(deadline)
@@ -124,7 +148,7 @@ func TestDefaultTimeoutReachesProviderContext(t *testing.T) {
 	}
 }
 
-func TestTimeoutPreservesCompletedWriteReceipt(t *testing.T) {
+func TestShouldReportCompletedWriteGivenTimeoutDuringSync(t *testing.T) {
 	adapter := &cliAdapter{write: func(ctx context.Context, writes []provider.Write) (provider.Receipt, error) {
 		<-ctx.Done()
 		return provider.Receipt{Completed: []string{writes[0].Environment}}, errors.New("remote provider leaked text")
@@ -136,7 +160,7 @@ func TestTimeoutPreservesCompletedWriteReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.Stdout = w
-	_, gotErr := executeWithRegistry(context.Background(), []string{"--template", path, "--timeout", "1ms", "sync"}, cliRegistry(adapter))
+	_, gotErr := executeWithRegistry(context.Background(), []string{"--template", path, "--timeout", "1ms", "sync", "--force"}, cliRegistry(adapter))
 	os.Stdout = old
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
@@ -149,12 +173,188 @@ func TestTimeoutPreservesCompletedWriteReceipt(t *testing.T) {
 		t.Fatalf("output=%q err=%v", output, gotErr)
 	}
 }
+
+func TestShouldRefuseToWriteGivenPendingChangeWithoutForceNonInteractively(t *testing.T) {
+	adapter := &cliAdapter{}
+	path := templateFile(t)
+	// A pipe is never a character device, so this deterministically exercises
+	// the non-interactive path regardless of whether the test runner's own
+	// stdin happens to be a real terminal.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close(); _ = w.Close() }()
+	old := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = old }()
+	_, err = executeWithRegistry(context.Background(), []string{"--template", path, "sync"}, cliRegistry(adapter))
+	if err == nil || !strings.Contains(err.Error(), "--force") || adapter.writes != 0 {
+		t.Fatalf("writes=%d err=%v", adapter.writes, err)
+	}
+}
+
+func TestShouldWritePendingChangeGivenForceFlag(t *testing.T) {
+	adapter := &cliAdapter{}
+	path := templateFile(t)
+	output := captureStdout(t, func() {
+		if _, err := executeWithRegistry(context.Background(), []string{"--template", path, "sync", "--force"}, cliRegistry(adapter)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if adapter.writes != 1 || output != "VALUE: synced\n" {
+		t.Fatalf("writes=%d output=%q", adapter.writes, output)
+	}
+}
+
+func TestShouldSkipWriteAndReportUnchangedGivenDestinationAlreadyMatches(t *testing.T) {
+	adapter := &cliAdapter{read: func(_ context.Context, refs []provider.Reference) (map[string]secret.Value, error) {
+		out := make(map[string]secret.Value, len(refs))
+		for _, r := range refs {
+			out[r.Binding()] = secret.New("resolved")
+		}
+		return out, nil
+	}}
+	path := templateFile(t)
+	output := captureStdout(t, func() {
+		if _, err := executeWithRegistry(context.Background(), []string{"--template", path, "sync"}, cliRegistry(adapter)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if adapter.writes != 0 || output != "1 unchanged, skipped\n" {
+		t.Fatalf("writes=%d output=%q", adapter.writes, output)
+	}
+}
+
+func TestShouldPrintJSONResultGivenJSONFlag(t *testing.T) {
+	adapter := &cliAdapter{}
+	path := templateFile(t)
+	output := captureStdout(t, func() {
+		if _, err := executeWithRegistry(context.Background(), []string{"--template", path, "sync", "--force", "--json"}, cliRegistry(adapter)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var result struct {
+		Changes []struct {
+			Environment string `json:"environment"`
+			Kind        string `json:"kind"`
+		} `json:"changes"`
+		Completed []string `json:"completed"`
+		Unchanged int      `json:"unchanged"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("output=%q err=%v", output, err)
+	}
+	if len(result.Changes) != 1 || result.Changes[0].Environment != "VALUE" || result.Changes[0].Kind != "create" || result.Unchanged != 0 || strings.Join(result.Completed, ",") != "VALUE" {
+		t.Fatalf("result=%+v output=%q", result, output)
+	}
+}
+
 func (a *cliAdapter) WriteMany(ctx context.Context, w []provider.Write) (provider.Receipt, error) {
 	a.writes++
 	if a.write != nil {
 		return a.write(ctx, w)
 	}
 	return provider.Receipt{Completed: []string{w[0].Environment}}, nil
+}
+
+// rollbackCliAdapter adds provider.Rollbacker to cliAdapter, so rollback
+// tests can distinguish "the provider supports rollback" from the plain
+// cliAdapter's baseline "provider doesn't implement it" case.
+type rollbackCliAdapter struct {
+	cliAdapter
+
+	rolledBack int
+	failWith   error
+}
+
+func (a *rollbackCliAdapter) Rollback(context.Context, provider.Reference) error {
+	a.rolledBack++
+	return a.failWith
+}
+
+// rollbackCliFactory, unlike cliFactory, holds a provider.Adapter interface
+// value rather than a concrete *cliAdapter, so the adapter it returns keeps
+// its real dynamic type — necessary for a provider.Rollbacker type
+// assertion to see rollbackCliAdapter's promoted Rollback method. Returning
+// the embedded *cliAdapter through cliFactory instead would erase it.
+type rollbackCliFactory struct{ adapter provider.Adapter }
+
+func (f rollbackCliFactory) Parse(string) (provider.Reference, error) {
+	return provider.Reference{Scheme: "fake", Container: "container", Key: "key"}, nil
+}
+func (f rollbackCliFactory) Adapter(context.Context, provider.Reference) (provider.Adapter, error) {
+	return f.adapter, nil
+}
+func rollbackCliRegistry(adapter provider.Adapter) *provider.Registry {
+	r := provider.NewRegistry()
+	r.Register("fake", rollbackCliFactory{adapter})
+	return r
+}
+
+func TestShouldRollbackGivenForceFlag(t *testing.T) {
+	adapter := &rollbackCliAdapter{}
+	path := templateFile(t)
+	output := captureStdout(t, func() {
+		if _, err := executeWithRegistry(context.Background(), []string{"--template", path, "rollback", "--force"}, rollbackCliRegistry(adapter)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if adapter.rolledBack != 1 || output != "VALUE: reverted\n" {
+		t.Fatalf("rolledBack=%d output=%q", adapter.rolledBack, output)
+	}
+}
+
+func TestShouldRefuseRollbackWithoutForceNonInteractively(t *testing.T) {
+	adapter := &rollbackCliAdapter{}
+	path := templateFile(t)
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close(); _ = w.Close() }()
+	old := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = old }()
+	_, err = executeWithRegistry(context.Background(), []string{"--template", path, "rollback"}, rollbackCliRegistry(adapter))
+	if err == nil || !strings.Contains(err.Error(), "--force") || adapter.rolledBack != 0 {
+		t.Fatalf("rolledBack=%d err=%v", adapter.rolledBack, err)
+	}
+}
+
+func TestShouldReportUnsupportedGivenProviderLacksRollback(t *testing.T) {
+	adapter := &cliAdapter{}
+	path := templateFile(t)
+	output := captureStdout(t, func() {
+		if _, err := executeWithRegistry(context.Background(), []string{"--template", path, "rollback", "--force"}, cliRegistry(adapter)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if output != "VALUE: unsupported\n" {
+		t.Fatalf("output=%q", output)
+	}
+}
+
+func TestShouldPrintRollbackJSONResultGivenJSONFlag(t *testing.T) {
+	adapter := &rollbackCliAdapter{}
+	path := templateFile(t)
+	output := captureStdout(t, func() {
+		if _, err := executeWithRegistry(context.Background(), []string{"--template", path, "rollback", "--force", "--json"}, rollbackCliRegistry(adapter)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var result struct {
+		Results []struct {
+			Environment string `json:"environment"`
+			Status      string `json:"status"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("output=%q err=%v", output, err)
+	}
+	if len(result.Results) != 1 || result.Results[0].Environment != "VALUE" || result.Results[0].Status != "reverted" {
+		t.Fatalf("result=%+v output=%q", result, output)
+	}
 }
 func cliRegistry(adapter *cliAdapter) *provider.Registry {
 	r := provider.NewRegistry()
@@ -169,7 +369,7 @@ func templateFile(t *testing.T) string {
 	}
 	return path
 }
-func TestCheckAndDryRunPerformNoProviderAccess(t *testing.T) {
+func TestShouldSkipProviderAccessGivenCheckOrDryRunCommand(t *testing.T) {
 	adapter := &cliAdapter{}
 	providers := cliRegistry(adapter)
 	path := templateFile(t)
@@ -183,7 +383,7 @@ func TestCheckAndDryRunPerformNoProviderAccess(t *testing.T) {
 		t.Fatalf("provider accesses=%d", adapter.accesses)
 	}
 }
-func TestRunReadsWithoutWritingAndPreservesExitStatus(t *testing.T) {
+func TestShouldReadOnceAndPreserveExitCodeGivenRunCommand(t *testing.T) {
 	adapter := &cliAdapter{}
 	providers := cliRegistry(adapter)
 	path := templateFile(t)
@@ -193,7 +393,7 @@ func TestRunReadsWithoutWritingAndPreservesExitStatus(t *testing.T) {
 	}
 }
 
-func TestRunRequiresArgumentSeparator(t *testing.T) {
+func TestShouldReturnMissingSeparatorErrorGivenRunWithoutDoubleDash(t *testing.T) {
 	adapter := &cliAdapter{}
 	path := templateFile(t)
 	for _, args := range [][]string{
@@ -210,7 +410,7 @@ func TestRunRequiresArgumentSeparator(t *testing.T) {
 	}
 }
 
-func TestGlobalFlagValueIsNotTreatedAsCommand(t *testing.T) {
+func TestShouldTreatFlagValueAsNotACommandGivenGlobalFlagPrecedesSubcommand(t *testing.T) {
 	adapter := &cliAdapter{}
 	path := templateFile(t)
 	if _, err := executeWithRegistry(context.Background(), []string{"--template", path, "check"}, cliRegistry(adapter)); err != nil {
@@ -221,7 +421,7 @@ func TestGlobalFlagValueIsNotTreatedAsCommand(t *testing.T) {
 	}
 }
 
-func TestSubcommandHelpDocumentsSyncAndRunSyntax(t *testing.T) {
+func TestShouldPrintUsageGivenSubcommandHelpFlag(t *testing.T) {
 	for _, tc := range []struct {
 		args []string
 		want string
@@ -240,7 +440,7 @@ func TestSubcommandHelpDocumentsSyncAndRunSyntax(t *testing.T) {
 	}
 }
 
-func TestRunHonorsGlobalHelpAndVersionWithoutSeparator(t *testing.T) {
+func TestShouldPrintGlobalHelpOrVersionGivenRunWithoutSeparator(t *testing.T) {
 	for _, tc := range []struct {
 		args []string
 		want string
@@ -260,14 +460,14 @@ func TestRunHonorsGlobalHelpAndVersionWithoutSeparator(t *testing.T) {
 	}
 }
 
-func TestUnknownGlobalFlagIsReportedBeforeCommandDiscovery(t *testing.T) {
+func TestShouldReportUnknownFlagErrorBeforeCommandDiscoveryGivenInvalidGlobalFlag(t *testing.T) {
 	_, err := executeWithRegistry(context.Background(), []string{"--foo", "bar", "check"}, cliRegistry(&cliAdapter{}))
 	if err == nil || !strings.Contains(err.Error(), "flag provided but not defined: -foo") {
 		t.Fatalf("err=%v", err)
 	}
 }
 
-func TestRunTreatsDoubleDashAsGlobalFlagValueBeforeSeparator(t *testing.T) {
+func TestShouldTreatDoubleDashAsFlagValueGivenTemplateFlagPrecedesSeparator(t *testing.T) {
 	t.Chdir(t.TempDir())
 	if err := os.WriteFile("--", []byte("VALUE=fake://source -> fake://target\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -282,7 +482,7 @@ func TestRunTreatsDoubleDashAsGlobalFlagValueBeforeSeparator(t *testing.T) {
 	}
 }
 
-func TestDoubleDashMayPrecedeCommand(t *testing.T) {
+func TestShouldAcceptCommandGivenLeadingDoubleDashSeparator(t *testing.T) {
 	path := templateFile(t)
 	t.Setenv("UNO_TEMPLATE", path)
 	if _, err := executeWithRegistry(context.Background(), []string{"--", "check"}, cliRegistry(&cliAdapter{})); err != nil {
@@ -290,7 +490,7 @@ func TestDoubleDashMayPrecedeCommand(t *testing.T) {
 	}
 }
 
-func TestEmptyArgumentRemainsTheCommand(t *testing.T) {
+func TestShouldReturnUnknownCommandErrorGivenEmptyStringArgument(t *testing.T) {
 	path := templateFile(t)
 	_, err := executeWithRegistry(context.Background(), []string{"--template", path, "", "sync", "--dry-run"}, cliRegistry(&cliAdapter{}))
 	if err == nil || err.Error() != `unknown command ""` {
@@ -298,7 +498,7 @@ func TestEmptyArgumentRemainsTheCommand(t *testing.T) {
 	}
 }
 
-func TestSingleDashLongGlobalFlags(t *testing.T) {
+func TestShouldPrintGlobalHelpOrVersionGivenSingleDashLongFlag(t *testing.T) {
 	for _, tc := range []struct {
 		args []string
 		want string
@@ -317,7 +517,7 @@ func TestSingleDashLongGlobalFlags(t *testing.T) {
 	}
 }
 
-func TestGlobalFlagErrorsUseGoFlagFormatting(t *testing.T) {
+func TestShouldFormatFlagErrorAsInvalidArgumentsGivenMalformedGlobalFlag(t *testing.T) {
 	for _, tc := range []struct {
 		args []string
 		want string
@@ -351,7 +551,7 @@ func captureStdout(t *testing.T, action func()) string {
 	}
 	return string(output)
 }
-func TestDevWritesSortedEscapedFileWithRestrictedPermissions(t *testing.T) {
+func TestShouldWriteEscapedSecretsFileWithRestrictedPermissionsGivenDevCommand(t *testing.T) {
 	adapter := &cliAdapter{value: "line one\n\"$VALUE\"\\end"}
 	providers := cliRegistry(adapter)
 	temporary := t.TempDir()
@@ -381,7 +581,7 @@ func TestDevWritesSortedEscapedFileWithRestrictedPermissions(t *testing.T) {
 		t.Fatalf("mode=%o reads=%d writes=%d", info.Mode().Perm(), adapter.reads, adapter.writes)
 	}
 }
-func TestDevRequiresGitignoreBeforeProviderAccess(t *testing.T) {
+func TestShouldFailBeforeProviderAccessGivenMissingGitignoreOnDevCommand(t *testing.T) {
 	adapter := &cliAdapter{}
 	providers := cliRegistry(adapter)
 	t.Chdir(t.TempDir())

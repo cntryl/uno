@@ -11,32 +11,77 @@ on:
 permissions: {}
 
 jobs:
-  go:
+  core:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version: '1.26.5'
+          cache: true
+
+      - name: Check formatting
+        shell: bash
+        run: test -z "$(gofmt -l .)"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Test with race detector
+        run: go test -race ./...
+
+      - name: Fuzz parser smoke tests
+        shell: bash
+        run: |
+          go test ./internal/core/template -run=^$ -fuzz=^FuzzParseEnv$ -fuzztime=10s
+          go test ./internal/aws -run=^$ -fuzz=^FuzzParseReference$ -fuzztime=10s
+          go test ./internal/onepassword -run=^$ -fuzz=^FuzzParseReference$ -fuzztime=10s
+          go test ./internal/vault -run=^$ -fuzz=^FuzzParseReference$ -fuzztime=10s
+          go test ./internal/gcp -run=^$ -fuzz=^FuzzParseReference$ -fuzztime=10s
+          go test ./internal/azure -run=^$ -fuzz=^FuzzParse$ -fuzztime=10s
+
+      - name: Cross-compile Windows permission path
+        if: matrix.os == 'ubuntu-latest'
+        run: GOOS=windows GOARCH=amd64 go test ./internal/dotenv -c -o /tmp/dotenv.test.exe
+
+  validate:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@v7.0.0
         with:
           go-version: '1.26.5'
           cache: true
-      - run: test -z "$(gofmt -l .)"
-      - run: go vet ./...
-      - run: go test ./...
-      - run: go test -race ./...
-      - name: Fuzz parser smoke tests
+
+      - name: Lint
         run: |
-          go test ./internal/core/template -run=^$ -fuzz=^FuzzParseEnv$ -fuzztime=10s
-          go test ./internal/aws -run=^$ -fuzz=^FuzzParseReference$ -fuzztime=10s
-          go test ./internal/onepassword -run=^$ -fuzz=^FuzzParseReference$ -fuzztime=10s
-      - run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
-      - run: golangci-lint config verify && golangci-lint run ./...
-      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
-      - run: govulncheck ./...
-      - name: Cross-compile Windows permission path
-        run: GOOS=windows GOARCH=amd64 go test ./internal/dotenv -c -o /tmp/dotenv.test.exe
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+          golangci-lint config verify
+          golangci-lint run ./...
+
+      - name: Scan for vulnerabilities
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+          govulncheck ./...
 
   package:
     runs-on: ubuntu-latest
@@ -44,15 +89,32 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: voidzero-dev/setup-vp@07d0b0e993009eb3b908ea06e49e88e933b728a2 # v1.17.0
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
         with:
           node-version: '24.15.0'
-          cache: true
-      - run: vp install --frozen-lockfile --ignore-scripts
-      - run: vp check
-      - run: vp test
-      - run: vp pack
-      - run: test ! -e dist/cli.js.map
-      - run: npm audit --audit-level=high
-      - run: vp test run test/metadata.test.ts
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Check formatting, lint, and types
+        run: npm run check
+
+      - name: Test
+        run: npm test
+
+      - name: Build package
+        run: npm run build
+
+      - name: Verify no source map is published
+        run: test ! -e dist/cli.js.map
+
+      - name: Audit npm dependencies
+        run: npm audit --audit-level=high
+
+      - name: Verify package metadata invariants
+        run: npm run check:release-versions

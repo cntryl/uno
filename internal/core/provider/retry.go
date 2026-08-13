@@ -8,10 +8,7 @@ import (
 )
 
 func WaitBeforeRetry(ctx context.Context, attempt int, wait func(context.Context, time.Duration) error, jitter func(time.Duration) time.Duration) error {
-	ceiling := 200 * time.Millisecond * time.Duration(1<<attempt)
-	if ceiling > 2*time.Second {
-		ceiling = 2 * time.Second
-	}
+	ceiling := backoffCeiling(attempt)
 	delay := randomDelay(ceiling)
 	if jitter != nil {
 		delay = jitter(ceiling)
@@ -30,6 +27,26 @@ func WaitBeforeRetry(ctx context.Context, attempt int, wait func(context.Context
 	case <-timer.C:
 		return nil
 	}
+}
+
+const (
+	backoffBase = 200 * time.Millisecond
+	backoffCap  = 2 * time.Second
+	// maxBackoffShift bounds the exponent so 1<<attempt can never overflow
+	// int64 (or the Duration arithmetic that follows); once the exponential
+	// term would already dwarf backoffCap, there's no need to compute it.
+	maxBackoffShift = 32
+)
+
+func backoffCeiling(attempt int) time.Duration {
+	if attempt < 0 || attempt > maxBackoffShift {
+		return backoffCap
+	}
+	ceiling := backoffBase * time.Duration(1<<uint(attempt))
+	if ceiling <= 0 || ceiling > backoffCap {
+		return backoffCap
+	}
+	return ceiling
 }
 
 func randomDelay(ceiling time.Duration) time.Duration {

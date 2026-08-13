@@ -56,7 +56,7 @@ func (f *fakeAPI) PutItem(_ context.Context, item op.Item) (op.Item, error) {
 	return item, nil
 }
 
-func TestWriteReloadsCurrentVersionAfterConflict(t *testing.T) {
+func TestShouldRetryWriteWithReloadedVersionGivenTypedVersionConflict(t *testing.T) {
 	fake := baseFake()
 	fake.item.Version = 7
 	fake.putFailures = 1
@@ -73,7 +73,7 @@ func TestWriteReloadsCurrentVersionAfterConflict(t *testing.T) {
 	}
 }
 
-func TestGenericWriteFailureIsNotRetried(t *testing.T) {
+func TestShouldNotRetryGivenGenericPutError(t *testing.T) {
 	fake := baseFake()
 	fake.putFailures = 4
 	write := provider.Write{Environment: "MY_API_KEY", Reference: provider.Reference{Region: "Production", Container: "service"}, Value: secret.New("new")}
@@ -82,7 +82,7 @@ func TestGenericWriteFailureIsNotRetried(t *testing.T) {
 	}
 }
 
-func TestTypedConflictAllowsThreeRetries(t *testing.T) {
+func TestShouldRetryUpToThreeTimesGivenTypedVersionConflicts(t *testing.T) {
 	fake := baseFake()
 	fake.putFailures = 4
 	fake.typedConflicts = true
@@ -95,7 +95,7 @@ func TestTypedConflictAllowsThreeRetries(t *testing.T) {
 	}
 }
 
-func TestTypedConflictBackoffIsBoundedAndHasNoFinalWait(t *testing.T) {
+func TestShouldBoundBackoffWithoutFinalWaitGivenRepeatedTypedConflicts(t *testing.T) {
 	fake := baseFake()
 	fake.putFailures = 4
 	fake.typedConflicts = true
@@ -110,7 +110,7 @@ func TestTypedConflictBackoffIsBoundedAndHasNoFinalWait(t *testing.T) {
 	}
 }
 
-func TestTypedConflictCancellationDuringBackoffIsIndeterminate(t *testing.T) {
+func TestShouldReturnIndeterminateErrorGivenCancellationDuringBackoff(t *testing.T) {
 	fake := baseFake()
 	fake.putFailures = 4
 	fake.typedConflicts = true
@@ -139,7 +139,7 @@ func baseFake() *fakeAPI {
 }
 func stringPtr(s string) *string { return &s }
 
-func TestParseNoteFieldAndDeepPath(t *testing.T) {
+func TestShouldParseSuccessfullyGivenValidOpReferenceVariants(t *testing.T) {
 	for _, raw := range []string{"op://vault/item", "op://vault/item/field", "op://vault/item/path1/path2/field"} {
 		if _, err := Parse(raw); err != nil {
 			t.Fatalf("%s: %v", raw, err)
@@ -166,7 +166,7 @@ func FuzzParseReference(f *testing.F) {
 	})
 }
 
-func TestReadsNoteAndDeepConcealedField(t *testing.T) {
+func TestShouldReadNoteAndDeepConcealedFieldGivenValidReferences(t *testing.T) {
 	fake := baseFake()
 	a := NewWithAPI(fake)
 	noteRef := provider.Reference{Region: "Production", Container: "service"}
@@ -180,7 +180,7 @@ func TestReadsNoteAndDeepConcealedField(t *testing.T) {
 		t.Fatalf("value=%q err=%v", values[fieldRef.Binding()].Reveal(), err)
 	}
 }
-func TestGroupedUpdatePreservesFieldsAndSections(t *testing.T) {
+func TestShouldPreserveFieldsAndSectionsGivenGroupedWrites(t *testing.T) {
 	fake := baseFake()
 	a := NewWithAPI(fake)
 	writes := []provider.Write{{Environment: "A", Reference: provider.Reference{Region: "Production", Container: "service", Key: "path1/path2/FIELD"}, Value: secret.New("new")}, {Environment: "B", Reference: provider.Reference{Region: "Production", Container: "service", Key: "new/path/SECOND"}, Value: secret.New("two")}}
@@ -190,7 +190,7 @@ func TestGroupedUpdatePreservesFieldsAndSections(t *testing.T) {
 	}
 }
 
-func TestWriteIgnoresNonConcealedFieldCollisionLikeRead(t *testing.T) {
+func TestShouldCreateNewConcealedFieldGivenNonConcealedFieldNameCollision(t *testing.T) {
 	fake := baseFake()
 	fake.item.Fields[1] = op.ItemField{
 		ID:        "MY_API_KEY",
@@ -211,7 +211,7 @@ func TestWriteIgnoresNonConcealedFieldCollisionLikeRead(t *testing.T) {
 	}
 }
 
-func TestNewSectionIDDoesNotCollideWithExistingIDs(t *testing.T) {
+func TestShouldGenerateNonCollidingSectionIDGivenExistingSectionID(t *testing.T) {
 	fake := baseFake()
 	fake.item.Sections = []op.ItemSection{{ID: "uno-1", Title: "existing"}}
 	write := provider.Write{Environment: "KEY", Reference: provider.Reference{Region: "Production", Container: "service", Key: "new/KEY"}, Value: secret.New("new")}
@@ -223,7 +223,7 @@ func TestNewSectionIDDoesNotCollideWithExistingIDs(t *testing.T) {
 	}
 }
 
-func TestAdapterCachesVaultAndItemListings(t *testing.T) {
+func TestShouldCacheVaultAndItemListingsGivenRepeatedReads(t *testing.T) {
 	fake := baseFake()
 	a := NewWithAPI(fake)
 	refs := []provider.Reference{{Region: "Production", Container: "service"}}
@@ -238,7 +238,7 @@ func TestAdapterCachesVaultAndItemListings(t *testing.T) {
 	}
 }
 
-func TestMissingItemIsNotCreated(t *testing.T) {
+func TestShouldNotCreateItemGivenMissingItem(t *testing.T) {
 	fake := baseFake()
 	fake.items = nil
 	a := NewWithAPI(fake)
@@ -247,7 +247,7 @@ func TestMissingItemIsNotCreated(t *testing.T) {
 		t.Fatalf("created=%#v err=%v", fake.created, err)
 	}
 }
-func TestAmbiguityAndAuthenticationPrecedence(t *testing.T) {
+func TestShouldSurfaceVaultAmbiguityAndAuthPrecedenceGivenDuplicateVaultsAndCredentials(t *testing.T) {
 	fake := baseFake()
 	fake.vaults = append(fake.vaults, op.VaultOverview{ID: "v2", Title: "Production"})
 	_, err := NewWithAPI(fake).ReadMany(context.Background(), []provider.Reference{{Region: "Production", Container: "service"}})

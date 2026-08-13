@@ -172,10 +172,56 @@ func (s *Secrets) WriteMany(ctx context.Context, writes []provider.Write) (provi
 	return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
 }
 
+// removePendingCleanupTimeout bounds the detached context used to strip a
+// pending version stage after the caller's context has already expired, so a
+// cleanup attempt following a timeout still gets a chance to run instead of
+// failing immediately and leaking the stage forever.
+const removePendingCleanupTimeout = 10 * time.Second
+
 func (s *Secrets) removePending(ctx context.Context, id, stage, version string) error {
+	if ctx.Err() != nil {
+		// The caller's context is already done (e.g. deadline exceeded during
+		// promotion). Detach from it so this cleanup call isn't doomed to fail
+		// before it even starts, which would otherwise leave the UNO-PENDING-*
+		// stage attached to the secret version forever.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), removePendingCleanupTimeout)
+		defer cancel()
+	}
 	_, err := s.C.UpdateSecretVersionStage(ctx, &sm.UpdateSecretVersionStageInput{SecretId: &id, VersionStage: &stage, RemoveFromVersionId: &version})
 	if err != nil {
 		return &provider.Error{Kind: provider.PendingCleanupFailed}
+	}
+	return nil
+}
+
+// Rollback moves AWSCURRENT back to whatever AWSPREVIOUS currently points
+// at — the exact inverse of the promotion WriteMany performs, so it's a
+// single compare-and-swap-free stage move rather than a new write. It fails
+// with InvalidState if there is no distinct previous version (e.g. the
+// secret has only ever been written once).
+func (s *Secrets) Rollback(ctx context.Context, ref provider.Reference) error {
+	id := ref.Container
+	current, err := s.C.GetSecretValue(ctx, &sm.GetSecretValueInput{SecretId: &id, VersionStage: stringPtr("AWSCURRENT")})
+	if err != nil {
+		return remoteError(err)
+	}
+	previous, err := s.C.GetSecretValue(ctx, &sm.GetSecretValueInput{SecretId: &id, VersionStage: stringPtr("AWSPREVIOUS")})
+	if err != nil {
+		return remoteError(err)
+	}
+	if current.VersionId == nil || previous.VersionId == nil {
+		return &provider.Error{Kind: provider.InvalidState, Detail: "no previous version to roll back to"}
+	}
+	if *current.VersionId == *previous.VersionId {
+		return &provider.Error{Kind: provider.InvalidState, Detail: "no distinct previous version to roll back to"}
+	}
+	_, err = s.C.UpdateSecretVersionStage(ctx, &sm.UpdateSecretVersionStageInput{
+		SecretId: &id, VersionStage: stringPtr("AWSCURRENT"),
+		MoveToVersionId: previous.VersionId, RemoveFromVersionId: current.VersionId,
+	})
+	if err != nil {
+		return remoteError(err)
 	}
 	return nil
 }

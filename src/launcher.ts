@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { statSync } from 'node:fs';
+import { constants as osConstants } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -69,10 +70,17 @@ export function runBinary(
     );
   }
   if (result.signal) {
-    throw new LauncherError(
-      'CHILD_SIGNAL',
-      `The uno binary terminated from signal ${result.signal}.`,
-    );
+    const signalNumber = (osConstants.signals as Record<string, number>)[result.signal];
+    if (typeof signalNumber !== 'number') {
+      throw new LauncherError(
+        'CHILD_SIGNAL',
+        `The uno binary terminated from signal ${result.signal}.`,
+      );
+    }
+    // Follow the POSIX/shell convention (128 + signal number) so callers and
+    // CI scripts can distinguish e.g. a user's SIGINT (130) from a SIGKILL
+    // (137) instead of seeing the same opaque failure code for both.
+    return 128 + signalNumber;
   }
   return result.status ?? 1;
 }
