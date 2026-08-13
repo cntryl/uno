@@ -12,10 +12,7 @@ import (
 	gcpbridge "github.com/cntryl/uno/internal/gcp"
 	opbridge "github.com/cntryl/uno/internal/onepassword"
 	vaultbridge "github.com/cntryl/uno/internal/vault"
-	buildversion "github.com/cntryl/uno/internal/version"
 )
-
-const version = buildversion.Current
 
 func main() {
 	code, err := execute(context.Background(), os.Args[1:])

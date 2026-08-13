@@ -42,25 +42,21 @@ func (Factory) Adapter(ctx context.Context, ref provider.Reference) (provider.Ad
 // percent-encoding for an internal "/".
 func Parse(raw string) (provider.Reference, error) {
 	if strings.ContainsRune(raw, 0) {
-		return invalidReference("reference contains NUL")
+		return provider.InvalidParse("reference contains NUL")
 	}
 	if !strings.HasPrefix(raw, "vault://") {
-		return invalidReference("unknown Vault reference scheme")
+		return provider.InvalidParse("unknown Vault reference scheme")
 	}
 	rest := strings.TrimPrefix(raw, "vault://")
 	parts := strings.Split(rest, "/")
 	if len(parts) < 3 {
-		return invalidReference("Vault reference requires mount/path/key")
+		return provider.InvalidParse("Vault reference requires mount/path/key")
 	}
 	mount := parts[0]
 	key := parts[len(parts)-1]
 	path := strings.Join(parts[1:len(parts)-1], "/")
 	if mount == "" || path == "" || key == "" {
-		return invalidReference("Vault reference requires a non-empty mount, path, and key")
+		return provider.InvalidParse("Vault reference requires a non-empty mount, path, and key")
 	}
 	return provider.Reference{Scheme: "vault", Region: mount, Container: path, Key: key, AdapterKey: adapterKey}, nil
-}
-
-func invalidReference(detail string) (provider.Reference, error) {
-	return provider.Reference{}, provider.InvalidReference(detail)
 }

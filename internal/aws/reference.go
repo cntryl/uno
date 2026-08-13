@@ -33,7 +33,7 @@ var completeSecretARN = regexp.MustCompile(`^(arn:[^:]+:secretsmanager:([^:]+):[
 
 func Parse(raw string) (provider.Reference, error) {
 	if strings.ContainsRune(raw, 0) {
-		return invalidReference("reference contains NUL")
+		return provider.InvalidParse("reference contains NUL")
 	}
 	switch {
 	case strings.HasPrefix(raw, "aws-secrets-manager://"):
@@ -43,26 +43,26 @@ func Parse(raw string) (provider.Reference, error) {
 	case strings.HasPrefix(raw, "aws-ssm://"):
 		return parseParameter(strings.TrimPrefix(raw, "aws-ssm://"))
 	default:
-		return invalidReference("unknown AWS reference scheme")
+		return provider.InvalidParse("unknown AWS reference scheme")
 	}
 }
 
 func parseSecretName(raw string) (provider.Reference, error) {
 	separator := strings.IndexByte(raw, '/')
 	if separator <= 0 || separator == len(raw)-1 {
-		return invalidReference("Secrets Manager reference requires region/secret-name[/key]")
+		return provider.InvalidParse("Secrets Manager reference requires region/secret-name[/key]")
 	}
 	region, binding := raw[:separator], raw[separator+1:]
 	nameRaw, key := binding, ""
 	if keySeparator := strings.LastIndexByte(binding, '/'); keySeparator >= 0 {
 		nameRaw, key = binding[:keySeparator], binding[keySeparator+1:]
 		if nameRaw == "" || key == "" {
-			return invalidReference("Secrets Manager reference requires region/secret-name[/key]")
+			return provider.InvalidParse("Secrets Manager reference requires region/secret-name[/key]")
 		}
 	}
 	name, err := url.PathUnescape(nameRaw)
 	if err != nil || name == "" {
-		return invalidReference("Secrets Manager secret name has invalid percent-encoding")
+		return provider.InvalidParse("Secrets Manager secret name has invalid percent-encoding")
 	}
 	return provider.Reference{Scheme: "aws-secrets-manager", Region: region, Container: name, Key: key, AdapterKey: "secrets-manager\x00" + region}, nil
 }
@@ -70,7 +70,7 @@ func parseSecretName(raw string) (provider.Reference, error) {
 func parseSecretARN(raw string) (provider.Reference, error) {
 	match := completeSecretARN.FindStringSubmatch(raw)
 	if match == nil {
-		return invalidReference("Secrets Manager ARN must be complete and include its six-character suffix")
+		return provider.InvalidParse("Secrets Manager ARN must be complete and include its six-character suffix")
 	}
 	return provider.Reference{Scheme: "aws-secrets-manager-arn", Region: match[2], Container: match[1], Key: match[3], AdapterKey: "secrets-manager\x00" + match[2]}, nil
 }
@@ -78,15 +78,11 @@ func parseSecretARN(raw string) (provider.Reference, error) {
 func parseParameter(raw string) (provider.Reference, error) {
 	separator := strings.IndexByte(raw, '/')
 	if separator <= 0 || separator == len(raw)-1 {
-		return invalidReference("SSM reference requires region/parameter-path")
+		return provider.InvalidParse("SSM reference requires region/parameter-path")
 	}
 	path := strings.TrimLeft(raw[separator+1:], "/")
 	if path == "" {
-		return invalidReference("SSM reference requires region/parameter-path")
+		return provider.InvalidParse("SSM reference requires region/parameter-path")
 	}
 	return provider.Reference{Scheme: "aws-ssm", Region: raw[:separator], Container: "/" + path, AdapterKey: "ssm\x00" + raw[:separator]}, nil
-}
-
-func invalidReference(detail string) (provider.Reference, error) {
-	return provider.Reference{}, provider.InvalidReference(detail)
 }

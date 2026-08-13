@@ -2,7 +2,6 @@ package gcp
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -14,7 +13,6 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/cntryl/uno/internal/core/provider"
-	"github.com/cntryl/uno/internal/core/secret"
 )
 
 // SecretManagerAPI is the subset of *secretmanager.Client's method set this
@@ -49,42 +47,7 @@ func (s *SecretManager) ReadMany(ctx context.Context, refs []provider.Reference)
 	if out.GetPayload() == nil {
 		return nil, &provider.Error{Kind: provider.InvalidState}
 	}
-	values := make(map[string]provider.ReadResult, len(refs))
-	fail := func(err error) (map[string]provider.ReadResult, error) {
-		provider.DestroyReadResults(values)
-		return nil, err
-	}
-	doc := map[string]json.RawMessage{}
-	parsed := false
-	for _, ref := range refs {
-		if ref.Container != refs[0].Container || ref.Region != refs[0].Region {
-			return fail(&provider.Error{Kind: provider.InvalidBinding})
-		}
-		if ref.Blob() {
-			values[ref.Binding()] = provider.ReadResult{Value: secret.New(string(out.GetPayload().GetData())), Found: true}
-			continue
-		}
-		if !parsed {
-			if json.Unmarshal(out.GetPayload().GetData(), &doc) != nil {
-				return fail(&provider.Error{Kind: provider.InvalidState})
-			}
-			parsed = true
-		}
-		raw, ok := doc[ref.Key]
-		if !ok {
-			values[ref.Binding()] = provider.ReadResult{}
-			continue
-		}
-		if string(raw) == "null" {
-			return fail(&provider.Error{Kind: provider.InvalidState})
-		}
-		var value string
-		if json.Unmarshal(raw, &value) != nil {
-			return fail(&provider.Error{Kind: provider.InvalidState})
-		}
-		values[ref.Binding()] = provider.ReadResult{Value: secret.New(value), Found: true}
-	}
-	return values, nil
+	return provider.ReadJSONDocument(refs, out.GetPayload().GetData())
 }
 
 // WriteMany merges every write into the secret's latest payload (like AWS
@@ -139,7 +102,7 @@ func (s *SecretManager) WriteMany(ctx context.Context, writes []provider.Write) 
 	default:
 		return provider.Receipt{}, remoteError(err)
 	}
-	payload, err := payloadFor(existingData, writes)
+	payload, err := provider.MergeJSONDocument(existingData, writes)
 	if err != nil {
 		return provider.Receipt{}, err
 	}
@@ -187,30 +150,6 @@ func versionNumber(resourceName string) (int, error) {
 		return 0, fmt.Errorf("unexpected version resource name")
 	}
 	return strconv.Atoi(resourceName[idx+len(marker):])
-}
-
-func payloadFor(existing []byte, writes []provider.Write) ([]byte, error) {
-	if writes[0].Reference.Blob() {
-		return []byte(writes[0].Value.Reveal()), nil
-	}
-	doc := map[string]json.RawMessage{}
-	if existing != nil {
-		if json.Unmarshal(existing, &doc) != nil {
-			return nil, &provider.Error{Kind: provider.InvalidState}
-		}
-	}
-	for _, write := range writes {
-		encoded, err := json.Marshal(write.Value.Reveal())
-		if err != nil {
-			return nil, &provider.Error{Kind: provider.InvalidState}
-		}
-		doc[write.Reference.Key] = encoded
-	}
-	encoded, err := json.Marshal(doc)
-	if err != nil {
-		return nil, &provider.Error{Kind: provider.InvalidState}
-	}
-	return encoded, nil
 }
 
 func isNotFound(err error) bool {

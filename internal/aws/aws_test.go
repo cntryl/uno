@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"testing/quick"
 	"time"
 
 	sm "github.com/aws/aws-sdk-go-v2/service/secretsmanager"
@@ -290,30 +289,11 @@ func TestShouldRebaseGivenConcurrentSiblingUpdate(t *testing.T) {
 	}
 }
 
-func TestShouldPreserveUnwrittenSiblingsGivenKeyedWrite(t *testing.T) {
-	property := func(siblings map[string]string, replacement string) bool {
-		delete(siblings, "__uno_target__")
-		existing, err := json.Marshal(siblings)
-		if err != nil {
-			return false
-		}
-		existingString := string(existing)
-		write := provider.Write{Reference: provider.Reference{Key: "__uno_target__"}, Value: secret.New(replacement)}
-		payload, err := payloadFor(&existingString, []provider.Write{write})
-		if err != nil {
-			return false
-		}
-		var got, want map[string]string
-		if json.Unmarshal(existing, &want) != nil || json.Unmarshal([]byte(payload), &got) != nil {
-			return false
-		}
-		want["__uno_target__"] = replacement
-		return reflect.DeepEqual(got, want)
-	}
-	if err := quick.Check(property, &quick.Config{MaxCount: 1_000}); err != nil {
-		t.Fatal(err)
-	}
-}
+// The sibling-preservation property that used to be tested here directly
+// against payloadFor now lives in internal/core/provider/jsondoc_test.go,
+// against the shared provider.MergeJSONDocument all keyed-write providers
+// use. TestShouldPreserveSiblingsWhenUpdatingAndCreateGivenMissingSecret
+// below still covers the AWS-specific WriteMany path end-to-end.
 
 func (f *fakeSecrets) GetSecretValue(context.Context, *sm.GetSecretValueInput, ...func(*sm.Options)) (*sm.GetSecretValueOutput, error) {
 	if f.value == nil {

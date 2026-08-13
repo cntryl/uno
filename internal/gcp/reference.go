@@ -34,26 +34,22 @@ func (Factory) Adapter(ctx context.Context, ref provider.Reference) (provider.Ad
 // percent-encoding for the container segment.
 func Parse(raw string) (provider.Reference, error) {
 	if strings.ContainsRune(raw, 0) {
-		return invalidReference("reference contains NUL")
+		return provider.InvalidParse("reference contains NUL")
 	}
 	if !strings.HasPrefix(raw, "gcp-secret-manager://") {
-		return invalidReference("unknown GCP Secret Manager reference scheme")
+		return provider.InvalidParse("unknown GCP Secret Manager reference scheme")
 	}
 	rest := strings.TrimPrefix(raw, "gcp-secret-manager://")
 	parts := strings.Split(rest, "/")
 	if len(parts) < 2 || len(parts) > 3 || parts[0] == "" || parts[1] == "" {
-		return invalidReference("GCP Secret Manager reference requires project/secret-name[/key]")
+		return provider.InvalidParse("GCP Secret Manager reference requires project/secret-name[/key]")
 	}
 	key := ""
 	if len(parts) == 3 {
 		key = parts[2]
 		if key == "" {
-			return invalidReference("GCP Secret Manager key must not be empty")
+			return provider.InvalidParse("GCP Secret Manager key must not be empty")
 		}
 	}
 	return provider.Reference{Scheme: "gcp-secret-manager", Region: parts[0], Container: parts[1], Key: key, AdapterKey: adapterKey}, nil
-}
-
-func invalidReference(detail string) (provider.Reference, error) {
-	return provider.Reference{}, provider.InvalidReference(detail)
 }

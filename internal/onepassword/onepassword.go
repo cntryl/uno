@@ -153,9 +153,6 @@ func (a *Adapter) ReadMany(ctx context.Context, refs []provider.Reference) (map[
 		return nil, err
 	}
 	for _, ref := range refs {
-		if ref.Container != refs[0].Container {
-			return fail(&provider.Error{Kind: provider.InvalidBinding})
-		}
 		if ref.Blob() {
 			values[ref.Binding()] = provider.ReadResult{Value: secret.New(item.Notes), Found: true}
 			continue

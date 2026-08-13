@@ -22,18 +22,18 @@ func (Factory) Adapter(ctx context.Context, _ provider.Reference) (provider.Adap
 
 func Parse(raw string) (provider.Reference, error) {
 	if strings.ContainsRune(raw, 0) {
-		return invalidReference("reference contains NUL")
+		return provider.InvalidParse("reference contains NUL")
 	}
 	if !strings.HasPrefix(raw, "op://") {
-		return invalidReference("1Password reference must start with op://")
+		return provider.InvalidParse("1Password reference must start with op://")
 	}
 	parts := strings.Split(strings.TrimPrefix(raw, "op://"), "/")
 	if len(parts) < 2 {
-		return invalidReference("1Password reference requires vault/item[/field]")
+		return provider.InvalidParse("1Password reference requires vault/item[/field]")
 	}
 	for _, part := range parts {
 		if part == "" {
-			return invalidReference("1Password vault, item, and field segments must not be empty")
+			return provider.InvalidParse("1Password vault, item, and field segments must not be empty")
 		}
 	}
 	key := ""
@@ -65,8 +65,4 @@ func clientOptions(token, account string) ([]op.ClientOption, error) {
 		return []op.ClientOption{op.WithDesktopAppIntegration(account)}, nil
 	}
 	return nil, &provider.Error{Kind: provider.Authentication}
-}
-
-func invalidReference(detail string) (provider.Reference, error) {
-	return provider.Reference{}, provider.InvalidReference(detail)
 }

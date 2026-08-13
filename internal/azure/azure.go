@@ -2,7 +2,6 @@ package azure
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"sort"
@@ -10,7 +9,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets"
 	"github.com/cntryl/uno/internal/core/provider"
-	"github.com/cntryl/uno/internal/core/secret"
 )
 
 type Client interface {
@@ -64,42 +62,7 @@ func (a *KeyVault) ReadMany(ctx context.Context, refs []provider.Reference) (map
 	if response.Value == nil {
 		return nil, &provider.Error{Kind: provider.InvalidState}
 	}
-	values := make(map[string]provider.ReadResult, len(refs))
-	fail := func(err error) (map[string]provider.ReadResult, error) {
-		provider.DestroyReadResults(values)
-		return nil, err
-	}
-	var doc map[string]json.RawMessage
-	parsed := false
-	for _, ref := range refs {
-		if ref.Region != refs[0].Region || ref.Container != refs[0].Container {
-			return fail(&provider.Error{Kind: provider.InvalidBinding})
-		}
-		if ref.Blob() {
-			values[ref.Binding()] = provider.ReadResult{Value: secret.New(*response.Value), Found: true}
-			continue
-		}
-		if !parsed {
-			if json.Unmarshal([]byte(*response.Value), &doc) != nil || doc == nil {
-				return fail(&provider.Error{Kind: provider.InvalidState})
-			}
-			parsed = true
-		}
-		raw, ok := doc[ref.Key]
-		if !ok {
-			values[ref.Binding()] = provider.ReadResult{}
-			continue
-		}
-		if string(raw) == "null" {
-			return fail(&provider.Error{Kind: provider.InvalidState})
-		}
-		var value string
-		if json.Unmarshal(raw, &value) != nil {
-			return fail(&provider.Error{Kind: provider.InvalidState})
-		}
-		values[ref.Binding()] = provider.ReadResult{Value: secret.New(value), Found: true}
-	}
-	return values, nil
+	return provider.ReadJSONDocument(refs, []byte(*response.Value))
 }
 
 func (a *KeyVault) WriteMany(ctx context.Context, writes []provider.Write) (provider.Receipt, error) {
@@ -110,45 +73,29 @@ func (a *KeyVault) WriteMany(ctx context.Context, writes []provider.Write) (prov
 		return provider.Receipt{}, nil
 	}
 	ref := writes[0].Reference
-	for _, write := range writes {
-		if write.Reference.Region != ref.Region || write.Reference.Container != ref.Container || write.Reference.Blob() != ref.Blob() {
-			return provider.Receipt{}, &provider.Error{Kind: provider.InvalidBinding}
-		}
-	}
 	params := azsecrets.SetSecretParameters{}
-	if ref.Blob() {
-		value := writes[0].Value.Reveal()
-		params.Value = &value
-	} else {
-		doc := map[string]json.RawMessage{}
+	var existing []byte
+	if !ref.Blob() {
 		current, err := a.C.GetSecret(ctx, ref.Container, "")
-		if err == nil {
-			if current.Value == nil || json.Unmarshal([]byte(*current.Value), &doc) != nil || doc == nil {
+		switch {
+		case err == nil:
+			if current.Value == nil {
 				return provider.Receipt{}, &provider.Error{Kind: provider.InvalidState}
 			}
+			existing = []byte(*current.Value)
 			params.ContentType = current.ContentType
 			params.Tags = current.Tags
 			params.SecretAttributes = current.Attributes
-		} else if !statusCode(err, 404) {
+		case !statusCode(err, 404):
 			return provider.Receipt{}, remoteError(err)
 		}
-		for _, write := range writes {
-			encoded, err := json.Marshal(write.Value.Reveal())
-			if err != nil {
-				return provider.Receipt{}, &provider.Error{Kind: provider.InvalidState}
-			}
-			doc[write.Reference.Key] = encoded
-		}
-		encoded, err := json.Marshal(doc)
-		if err != nil {
-			return provider.Receipt{}, &provider.Error{Kind: provider.InvalidState}
-		}
-		value := string(encoded)
-		params.Value = &value
 	}
-	if params.Value == nil {
-		return provider.Receipt{}, &provider.Error{Kind: provider.InvalidState}
+	payload, err := provider.MergeJSONDocument(existing, writes)
+	if err != nil {
+		return provider.Receipt{}, err
 	}
+	value := string(payload)
+	params.Value = &value
 	if _, err := a.C.SetSecret(ctx, ref.Container, params); err != nil {
 		return provider.Receipt{}, remoteError(err)
 	}

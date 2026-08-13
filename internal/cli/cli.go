@@ -201,10 +201,7 @@ func Execute(ctx context.Context, args []string, providers *provider.Registry, r
 		} else {
 			printSyncResult(a.runtime.Stdout, result, err)
 		}
-		if errors.Is(opCtx.Err(), context.DeadlineExceeded) {
-			return 0, fmt.Errorf("operation timed out")
-		}
-		return 0, err
+		return 0, wrapTimeout(opCtx, err)
 	case "dev":
 		fs := flag.NewFlagSet("dev", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
@@ -221,33 +218,21 @@ func Execute(ctx context.Context, args []string, providers *provider.Registry, r
 		opCtx, cancel := context.WithTimeout(ctx, a.timeout)
 		defer cancel()
 		if err := devguard.Check(opCtx, "."); err != nil {
-			if errors.Is(opCtx.Err(), context.DeadlineExceeded) {
-				return 0, fmt.Errorf("operation timed out")
-			}
-			return 0, err
+			return 0, wrapTimeout(opCtx, err)
 		}
 		values, err := engine.Resolve(opCtx, plan)
 		if err != nil {
-			if errors.Is(opCtx.Err(), context.DeadlineExceeded) {
-				return 0, fmt.Errorf("operation timed out")
-			}
-			return 0, err
+			return 0, wrapTimeout(opCtx, err)
 		}
 		defer secret.DestroyMap(values)
 		if err := devguard.Check(opCtx, "."); err != nil {
-			if errors.Is(opCtx.Err(), context.DeadlineExceeded) {
-				return 0, fmt.Errorf("operation timed out")
-			}
-			return 0, err
+			return 0, wrapTimeout(opCtx, err)
 		}
 		if err := dotenv.Write(".env.secrets", values); err != nil {
-			if errors.Is(opCtx.Err(), context.DeadlineExceeded) {
-				return 0, fmt.Errorf("operation timed out")
-			}
-			return 0, err
+			return 0, wrapTimeout(opCtx, err)
 		}
-		if errors.Is(opCtx.Err(), context.DeadlineExceeded) {
-			return 0, fmt.Errorf("operation timed out")
+		if err := wrapTimeout(opCtx, nil); err != nil {
+			return 0, err
 		}
 		_, _ = fmt.Fprintf(a.runtime.Stdout, "wrote .env.secrets with %d secrets\n", len(values))
 		return 0, nil
@@ -261,10 +246,7 @@ func Execute(ctx context.Context, args []string, providers *provider.Registry, r
 		values, err := engine.Resolve(opCtx, plan)
 		cancel()
 		if err != nil {
-			if errors.Is(opCtx.Err(), context.DeadlineExceeded) {
-				return 0, fmt.Errorf("operation timed out")
-			}
-			return 0, err
+			return 0, wrapTimeout(opCtx, err)
 		}
 		defer secret.DestroyMap(values)
 		cmd := a.runtime.Command(ctx, commandArgs[0], commandArgs[1:]...)
@@ -327,10 +309,7 @@ func Execute(ctx context.Context, args []string, providers *provider.Registry, r
 				}
 			}
 		}
-		if errors.Is(opCtx.Err(), context.DeadlineExceeded) {
-			return 0, fmt.Errorf("operation timed out")
-		}
-		return 0, err
+		return 0, wrapTimeout(opCtx, err)
 	default:
 		return 0, fmt.Errorf("unknown command %q", command)
 	}
@@ -464,6 +443,19 @@ func parseFlagError(flags *flag.FlagSet, arg string) error {
 	return fmt.Errorf("invalid arguments: invalid flag %s", arg)
 }
 func cleanFlagError(err error) error { return fmt.Errorf("invalid arguments: %w", err) }
+
+// wrapTimeout reports a plain "operation timed out" instead of err when
+// ctx's own deadline is why the preceding call failed — the provider error
+// it would otherwise return (e.g. "read failed: Indeterminate") is
+// misleading when the real cause was simply running out of time. Passing a
+// nil err still surfaces the timeout if the deadline was reached exactly as
+// the last operation finished successfully.
+func wrapTimeout(ctx context.Context, err error) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("operation timed out")
+	}
+	return err
+}
 
 // confirmAction asks for a yes/no answer on stdin/stdout before a
 // destructive command proceeds. A non-interactive session (no TTY on

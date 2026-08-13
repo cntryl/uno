@@ -36,31 +36,31 @@ func (Factory) Adapter(ctx context.Context, ref provider.Reference) (provider.Ad
 
 func Parse(raw string) (provider.Reference, error) {
 	if strings.ContainsRune(raw, 0) {
-		return invalidReference("reference contains NUL")
+		return provider.InvalidParse("reference contains NUL")
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "azure-key-vault" || u.Opaque != "" {
-		return invalidReference("unknown Azure Key Vault reference scheme")
+		return provider.InvalidParse("unknown Azure Key Vault reference scheme")
 	}
 	if u.User != nil || u.Port() != "" || u.RawQuery != "" || u.Fragment != "" {
-		return invalidReference("Azure Key Vault reference contains unsupported URL data")
+		return provider.InvalidParse("Azure Key Vault reference contains unsupported URL data")
 	}
 	host := strings.ToLower(u.Hostname())
 	if host == "" || net.ParseIP(host) != nil || !canonicalVaultHost(host) {
-		return invalidReference("Azure Key Vault reference requires a canonical vault hostname")
+		return provider.InvalidParse("Azure Key Vault reference requires a canonical vault hostname")
 	}
 	if u.EscapedPath() != u.Path {
-		return invalidReference("Azure Key Vault path must not be escaped")
+		return provider.InvalidParse("Azure Key Vault path must not be escaped")
 	}
 	parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
 	if len(parts) < 1 || len(parts) > 2 || parts[0] == "" || !secretNamePattern.MatchString(parts[0]) {
-		return invalidReference("Azure Key Vault reference requires secret-name[/key]")
+		return provider.InvalidParse("Azure Key Vault reference requires secret-name[/key]")
 	}
 	key := ""
 	if len(parts) == 2 {
 		key = parts[1]
 		if key == "" {
-			return invalidReference("Azure Key Vault key must not be empty")
+			return provider.InvalidParse("Azure Key Vault key must not be empty")
 		}
 	}
 	return provider.Reference{Scheme: "azure-key-vault", Region: host, Container: parts[0], Key: key, AdapterKey: host}, nil
@@ -74,8 +74,4 @@ func canonicalVaultHost(host string) bool {
 		}
 	}
 	return false
-}
-
-func invalidReference(detail string) (provider.Reference, error) {
-	return provider.Reference{}, provider.InvalidReference(detail)
 }

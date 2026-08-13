@@ -38,6 +38,14 @@ func (e *Error) Error() string {
 
 func InvalidReference(detail string) error { return &Error{Kind: InvalidBinding, Detail: detail} }
 
+// InvalidParse builds the (Reference{}, error) pair every provider's
+// Factory.Parse implementation returns on a rejected raw reference — every
+// provider package defined this exact one-liner itself before it moved
+// here.
+func InvalidParse(detail string) (Reference, error) {
+	return Reference{}, InvalidReference(detail)
+}
+
 func BindingDetail(err error) string {
 	var typed *Error
 	if errors.As(err, &typed) && typed.Detail != "" {

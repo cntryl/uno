@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"time"
 
@@ -14,7 +13,6 @@ import (
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/smithy-go"
 	"github.com/cntryl/uno/internal/core/provider"
-	"github.com/cntryl/uno/internal/core/secret"
 )
 
 type SecretsAPI interface {
@@ -41,58 +39,16 @@ func (s *Secrets) ReadMany(ctx context.Context, refs []provider.Reference) (map[
 	out, err := s.C.GetSecretValue(ctx, &sm.GetSecretValueInput{SecretId: &refs[0].Container})
 	if err != nil {
 		if isMissing(err) {
-			return missing(refs), nil
+			return provider.MissingResults(refs), nil
 		}
 		return nil, remoteError(err)
 	}
 	if out.SecretString == nil {
 		return nil, &provider.Error{Kind: provider.InvalidState}
 	}
-	values := make(map[string]provider.ReadResult, len(refs))
-	fail := func(err error) (map[string]provider.ReadResult, error) {
-		provider.DestroyReadResults(values)
-		return nil, err
-	}
-	doc := map[string]json.RawMessage{}
-	parsed := false
-	for _, ref := range refs {
-		if ref.Container != refs[0].Container {
-			return fail(&provider.Error{Kind: provider.InvalidBinding})
-		}
-		if ref.Blob() {
-			values[ref.Binding()] = provider.ReadResult{Value: secret.New(*out.SecretString), Found: true}
-			continue
-		}
-		if !parsed {
-			if json.Unmarshal([]byte(*out.SecretString), &doc) != nil {
-				return fail(&provider.Error{Kind: provider.InvalidState})
-			}
-			parsed = true
-		}
-		raw, ok := doc[ref.Key]
-		if !ok {
-			values[ref.Binding()] = provider.ReadResult{}
-			continue
-		}
-		if string(raw) == "null" {
-			return fail(&provider.Error{Kind: provider.InvalidState})
-		}
-		var value string
-		if json.Unmarshal(raw, &value) != nil {
-			return fail(&provider.Error{Kind: provider.InvalidState})
-		}
-		values[ref.Binding()] = provider.ReadResult{Value: secret.New(value), Found: true}
-	}
-	return values, nil
+	return provider.ReadJSONDocument(refs, []byte(*out.SecretString))
 }
 
-func missing(refs []provider.Reference) map[string]provider.ReadResult {
-	values := make(map[string]provider.ReadResult, len(refs))
-	for _, ref := range refs {
-		values[ref.Binding()] = provider.ReadResult{}
-	}
-	return values
-}
 func (s *Secrets) WriteMany(ctx context.Context, writes []provider.Write) (provider.Receipt, error) {
 	if err := provider.ValidateWriteGroup(writes); err != nil {
 		return provider.Receipt{}, err
@@ -104,11 +60,12 @@ func (s *Secrets) WriteMany(ctx context.Context, writes []provider.Write) (provi
 	for attempt := range maxWriteAttempts {
 		out, getErr := s.C.GetSecretValue(ctx, &sm.GetSecretValueInput{SecretId: &id})
 		if isMissing(getErr) {
-			payload, err := payloadFor(nil, writes)
+			payload, err := provider.MergeJSONDocument(nil, writes)
 			if err != nil {
 				return provider.Receipt{}, err
 			}
-			if _, err = s.C.CreateSecret(ctx, &sm.CreateSecretInput{Name: &id, SecretString: &payload}); err == nil {
+			payloadString := string(payload)
+			if _, err = s.C.CreateSecret(ctx, &sm.CreateSecretInput{Name: &id, SecretString: &payloadString}); err == nil {
 				return provider.Receipt{Completed: provider.Environments(writes)}, nil
 			}
 			var exists *smtypes.ResourceExistsException
@@ -129,16 +86,21 @@ func (s *Secrets) WriteMany(ctx context.Context, writes []provider.Write) (provi
 		if out.VersionId == nil {
 			return provider.Receipt{}, &provider.Error{Kind: provider.InvalidState}
 		}
-		payload, err := payloadFor(out.SecretString, writes)
+		var existing []byte
+		if out.SecretString != nil {
+			existing = []byte(*out.SecretString)
+		}
+		payload, err := provider.MergeJSONDocument(existing, writes)
 		if err != nil {
 			return provider.Receipt{}, err
 		}
+		payloadString := string(payload)
 		token, err := randomToken()
 		if err != nil {
 			return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
 		}
 		stage := "UNO-PENDING-" + token
-		put, err := s.C.PutSecretValue(ctx, &sm.PutSecretValueInput{SecretId: &id, SecretString: &payload, ClientRequestToken: &token, VersionStages: []string{stage}})
+		put, err := s.C.PutSecretValue(ctx, &sm.PutSecretValueInput{SecretId: &id, SecretString: &payloadString, ClientRequestToken: &token, VersionStages: []string{stage}})
 		if err != nil {
 			return provider.Receipt{}, remoteError(err)
 		}
@@ -250,29 +212,6 @@ func (s *Secrets) Rollback(ctx context.Context, ref provider.Reference) error {
 
 func (s *Secrets) waitBeforeRetry(ctx context.Context, attempt int) error {
 	return provider.WaitBeforeRetry(ctx, attempt, s.wait, s.jitter)
-}
-func payloadFor(existing *string, writes []provider.Write) (string, error) {
-	if writes[0].Reference.Blob() {
-		return writes[0].Value.Reveal(), nil
-	}
-	doc := map[string]json.RawMessage{}
-	if existing != nil {
-		if json.Unmarshal([]byte(*existing), &doc) != nil {
-			return "", &provider.Error{Kind: provider.InvalidState}
-		}
-	}
-	for _, write := range writes {
-		encoded, marshalErr := json.Marshal(write.Value.Reveal())
-		if marshalErr != nil {
-			return "", &provider.Error{Kind: provider.InvalidState}
-		}
-		doc[write.Reference.Key] = encoded
-	}
-	encoded, err := json.Marshal(doc)
-	if err != nil {
-		return "", &provider.Error{Kind: provider.InvalidState}
-	}
-	return string(encoded), nil
 }
 func randomToken() (string, error) {
 	var b [16]byte
