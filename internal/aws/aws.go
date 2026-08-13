@@ -21,6 +21,9 @@ type SecretsAPI interface {
 	PutSecretValue(context.Context, *sm.PutSecretValueInput, ...func(*sm.Options)) (*sm.PutSecretValueOutput, error)
 	UpdateSecretVersionStage(context.Context, *sm.UpdateSecretVersionStageInput, ...func(*sm.Options)) (*sm.UpdateSecretVersionStageOutput, error)
 }
+type secretsDescriber interface {
+	DescribeSecret(context.Context, *sm.DescribeSecretInput, ...func(*sm.Options)) (*sm.DescribeSecretOutput, error)
+}
 type Secrets struct {
 	C      SecretsAPI
 	wait   func(context.Context, time.Duration) error
@@ -65,6 +68,25 @@ func (s *Secrets) WriteMany(ctx context.Context, writes []provider.Write) (provi
 				return provider.Receipt{}, err
 			}
 			payloadString := string(payload)
+			if describer, ok := s.C.(secretsDescriber); ok {
+				_, describeErr := describer.DescribeSecret(ctx, &sm.DescribeSecretInput{SecretId: &id})
+				switch {
+				case describeErr == nil:
+					token, tokenErr := randomToken()
+					if tokenErr != nil {
+						return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
+					}
+					_, putErr := s.C.PutSecretValue(ctx, &sm.PutSecretValueInput{
+						SecretId: &id, SecretString: &payloadString, ClientRequestToken: &token,
+					})
+					if putErr != nil {
+						return provider.Receipt{}, remoteError(putErr)
+					}
+					return provider.Receipt{Completed: provider.Environments(writes)}, nil
+				case !isMissing(describeErr):
+					return provider.Receipt{}, remoteError(describeErr)
+				}
+			}
 			if _, err = s.C.CreateSecret(ctx, &sm.CreateSecretInput{Name: &id, SecretString: &payloadString}); err == nil {
 				return provider.Receipt{Completed: provider.Environments(writes)}, nil
 			}

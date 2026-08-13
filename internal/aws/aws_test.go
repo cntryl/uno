@@ -62,6 +62,7 @@ type fakeSecrets struct {
 	value         *string
 	puts, creates int
 	last          string
+	exists        bool
 }
 
 type promotionFake struct {
@@ -308,6 +309,12 @@ func (f *fakeSecrets) CreateSecret(_ context.Context, in *sm.CreateSecretInput, 
 	f.value = in.SecretString
 	return &sm.CreateSecretOutput{}, nil
 }
+func (f *fakeSecrets) DescribeSecret(context.Context, *sm.DescribeSecretInput, ...func(*sm.Options)) (*sm.DescribeSecretOutput, error) {
+	if !f.exists {
+		return nil, &smtypes.ResourceNotFoundException{}
+	}
+	return &sm.DescribeSecretOutput{}, nil
+}
 func (f *fakeSecrets) PutSecretValue(_ context.Context, in *sm.PutSecretValueInput, _ ...func(*sm.Options)) (*sm.PutSecretValueOutput, error) {
 	f.puts++
 	f.last = *in.SecretString
@@ -331,6 +338,15 @@ func TestShouldPreserveSiblingsWhenUpdatingAndCreateGivenMissingSecret(t *testin
 	_, err = adapter.WriteMany(context.Background(), []provider.Write{{Environment: "K", Reference: ref, Value: secret.New("new")}})
 	if err != nil || missing.creates != 1 {
 		t.Fatalf("creates=%d err=%v", missing.creates, err)
+	}
+}
+func TestShouldInitializeExistingSecretGivenNoCurrentVersion(t *testing.T) {
+	fake := &fakeSecrets{exists: true}
+	adapter := &Secrets{C: fake}
+	ref := provider.Reference{Container: "secret", Key: "change"}
+	_, err := adapter.WriteMany(context.Background(), []provider.Write{{Environment: "K", Reference: ref, Value: secret.New("new")}})
+	if err != nil || fake.puts != 1 || fake.creates != 0 {
+		t.Fatalf("puts=%d creates=%d err=%v", fake.puts, fake.creates, err)
 	}
 }
 func TestShouldReadAndWriteBlobGivenReferenceWithoutKey(t *testing.T) {
