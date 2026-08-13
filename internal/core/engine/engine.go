@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"sync"
 
 	"github.com/cntryl/uno/internal/core/provider"
 	"github.com/cntryl/uno/internal/core/secret"
@@ -65,47 +67,84 @@ func Resolve(ctx context.Context, p *Plan) (map[string]secret.Value, error) {
 		}
 	}()
 	adapters := newAdapterCache(p.Registry)
-	for _, group := range groupSources(p.Mappings) {
-		adapter, err := adapters.get(ctx, group.reference)
-		if err != nil {
-			return nil, safeOperationError("read", err)
-		}
-		refs := make([]provider.Reference, 0, len(group.mappings))
-		seen := make(map[string]bool)
-		for _, mapping := range group.mappings {
-			if binding := mapping.Source.Binding(); !seen[binding] {
-				seen[binding] = true
-				refs = append(refs, mapping.Source)
-			}
-		}
-		got, err := adapter.ReadMany(ctx, refs)
-		if err != nil {
-			secret.DestroyMap(got)
-			return nil, safeOperationError("read", err)
-		}
-		valid := len(got) == len(refs)
-		for _, ref := range refs {
-			if _, ok := got[ref.Binding()]; !ok {
-				valid = false
-			}
-		}
-		for key := range got {
-			if !seen[key] {
-				valid = false
-			}
-		}
-		if !valid {
-			secret.DestroyMap(got)
-			return nil, safeOperationError("read", &provider.Error{Kind: provider.InvalidState})
-		}
-		for _, mapping := range group.mappings {
-			values[mapping.Environment] = got[mapping.Source.Binding()].Clone()
-		}
-		secret.DestroyMap(got)
+	groups := groupSources(p.Mappings)
+	type result struct {
+		values map[string]secret.Value
+		err    error
 	}
-	result := values
+	results := make([]result, len(groups))
+	var workers sync.WaitGroup
+	for i, group := range groups {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			results[i].values, results[i].err = resolveGroup(ctx, adapters, group)
+		}()
+	}
+	workers.Wait()
+	for i := range results {
+		if results[i].err != nil {
+			for j := range results {
+				secret.DestroyMap(results[j].values)
+			}
+			return nil, results[i].err
+		}
+		for key, value := range results[i].values {
+			values[key] = value
+		}
+		results[i].values = nil
+	}
+	resultValues := values
 	values = nil
-	return result, nil
+	return resultValues, nil
+}
+
+func resolveGroup(ctx context.Context, adapters *adapterCache, group sourceGroup) (map[string]secret.Value, error) {
+	values := make(map[string]secret.Value, len(group.mappings))
+	defer func() {
+		if values != nil {
+			secret.DestroyMap(values)
+		}
+	}()
+	adapter, err := adapters.get(ctx, group.reference)
+	if err != nil {
+		return nil, safeOperationError("read", err)
+	}
+	refs := make([]provider.Reference, 0, len(group.mappings))
+	seen := make(map[string]bool)
+	for _, mapping := range group.mappings {
+		if binding := mapping.Source.Binding(); !seen[binding] {
+			seen[binding] = true
+			refs = append(refs, mapping.Source)
+		}
+	}
+	got, err := adapter.ReadMany(ctx, refs)
+	if err != nil {
+		secret.DestroyMap(got)
+		return nil, safeOperationError("read", err)
+	}
+	valid := len(got) == len(refs)
+	for _, ref := range refs {
+		if _, ok := got[ref.Binding()]; !ok {
+			valid = false
+		}
+	}
+	for key := range got {
+		if !seen[key] {
+			valid = false
+		}
+	}
+	if !valid {
+		secret.DestroyMap(got)
+		return nil, safeOperationError("read", &provider.Error{Kind: provider.InvalidState})
+	}
+	for _, mapping := range group.mappings {
+		values[mapping.Environment] = got[mapping.Source.Binding()].Clone()
+	}
+	secret.DestroyMap(got)
+	resultValues := values
+	values = nil
+	return resultValues, nil
 }
 
 func Sync(ctx context.Context, p *Plan) (Receipt, error) {
@@ -114,18 +153,38 @@ func Sync(ctx context.Context, p *Plan) (Receipt, error) {
 		return Receipt{}, err
 	}
 	defer secret.DestroyMap(values)
-	completed := []string{}
+	groups := groupDestinations(p.Mappings, values)
+	type writeResult struct {
+		receipt provider.Receipt
+		err     error
+	}
+	results := make([]writeResult, len(groups))
+	var workers sync.WaitGroup
 	adapters := newAdapterCache(p.Registry)
-	for _, group := range groupDestinations(p.Mappings, values) {
-		adapter, initErr := adapters.get(ctx, group.reference)
-		if initErr != nil {
-			return Receipt{}, &Error{Message: safeKind("write", initErr), Completed: completed}
+	for i, group := range groups {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			adapter, err := adapters.get(ctx, group.reference)
+			if err != nil {
+				results[i].err = err
+				return
+			}
+			results[i].receipt, results[i].err = adapter.WriteMany(ctx, group.writes)
+		}()
+	}
+	workers.Wait()
+	completed := []string{}
+	var firstErr error
+	for _, result := range results {
+		completed = append(completed, result.receipt.Completed...)
+		if firstErr == nil && result.err != nil {
+			firstErr = result.err
 		}
-		receipt, writeErr := adapter.WriteMany(ctx, group.writes)
-		completed = append(completed, receipt.Completed...)
-		if writeErr != nil {
-			return Receipt{}, &Error{Message: safeKind("write", writeErr), Completed: completed}
-		}
+	}
+	sort.Strings(completed)
+	if firstErr != nil {
+		return Receipt{}, &Error{Message: safeKind("write", firstErr), Completed: completed}
 	}
 	return Receipt{Completed: completed}, nil
 }

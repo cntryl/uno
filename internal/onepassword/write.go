@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 
 	op "github.com/1password/onepassword-sdk-go"
 	"github.com/cntryl/uno/internal/core/provider"
@@ -31,7 +30,7 @@ func (a *Adapter) WriteMany(ctx context.Context, writes []provider.Write) (provi
 			return provider.Receipt{}, err
 		}
 		if _, err := a.mutation.PutItem(ctx, *item); err == nil {
-			return provider.Receipt{Completed: environments(writes)}, nil
+			return provider.Receipt{Completed: provider.Environments(writes)}, nil
 		} else {
 			var conflict versionConflict
 			if !errors.As(err, &conflict) || !conflict.VersionConflict() {
@@ -92,7 +91,7 @@ func updateFields(item *op.Item, writes []provider.Write) error {
 func matchingFieldIndexes(item *op.Item, sectionID *string, field string) []int {
 	matches := make([]int, 0, 1)
 	for i, candidate := range item.Fields {
-		if (candidate.ID == field || candidate.Title == field) && sameSection(candidate.SectionID, sectionID) {
+		if candidate.FieldType == op.ItemFieldTypeConcealed && (candidate.ID == field || candidate.Title == field) && sameSection(candidate.SectionID, sectionID) {
 			matches = append(matches, i)
 		}
 	}
@@ -111,17 +110,19 @@ func ensureSection(item *op.Item, title string) (*string, error) {
 	if !errors.As(err, &typed) || typed.Kind != provider.InvalidBinding {
 		return nil, err
 	}
-	item.Sections = append(item.Sections, op.ItemSection{ID: sectionID(len(item.Sections)), Title: title})
+	item.Sections = append(item.Sections, op.ItemSection{ID: nextSectionID(item), Title: title})
 	return &item.Sections[len(item.Sections)-1].ID, nil
 }
 
-func sectionID(index int) string { return fmt.Sprintf("uno-%d", index) }
-
-func environments(writes []provider.Write) []string {
-	result := make([]string, 0, len(writes))
-	for _, write := range writes {
-		result = append(result, write.Environment)
+func nextSectionID(item *op.Item) string {
+	used := make(map[string]bool, len(item.Sections))
+	for _, section := range item.Sections {
+		used[section.ID] = true
 	}
-	sort.Strings(result)
-	return result
+	for index := 0; ; index++ {
+		candidate := fmt.Sprintf("uno-%d", index)
+		if !used[candidate] {
+			return candidate
+		}
+	}
 }

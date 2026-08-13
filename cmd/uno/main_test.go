@@ -16,9 +16,9 @@ import (
 )
 
 func TestSafeChildEnvironmentStripsProviderCapabilities(t *testing.T) {
-	got := safeChildEnvironment([]string{"PATH=/bin", "AWS_REGION=us-east-1", "AWS_PROFILE=admin", "AWS_SECRET_ACCESS_KEY=secret", "AWS_FOO_BAR=x", "OP_SERVICE_ACCOUNT_TOKEN=token", "ORDINARY=value"}, registry().CapabilityPrefixes())
+	got := safeChildEnvironment([]string{"PATH=/bin", "AWS_REGION=us-east-1", "Aws_Access_Key_Id=mixed-secret", "op_service_account_token=mixed-token", "AWS_PROFILE=admin", "AWS_SECRET_ACCESS_KEY=secret", "AWS_FOO_BAR=x", "OP_SERVICE_ACCOUNT_TOKEN=token", "ORDINARY=value"}, registry().CapabilityPrefixes())
 	joined := strings.Join(got, "\n")
-	if !strings.Contains(joined, "PATH=/bin") || !strings.Contains(joined, "ORDINARY=value") || strings.Contains(joined, "AWS_") || strings.Contains(joined, "OP_") || strings.Contains(joined, "secret") || strings.Contains(joined, "token") {
+	if !strings.Contains(joined, "PATH=/bin") || !strings.Contains(joined, "ORDINARY=value") || strings.Contains(strings.ToUpper(joined), "AWS_") || strings.Contains(strings.ToUpper(joined), "OP_") || strings.Contains(joined, "secret") || strings.Contains(joined, "token") {
 		t.Fatalf("unsafe child environment: %v", got)
 	}
 }

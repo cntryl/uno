@@ -2,7 +2,6 @@ package aws
 
 import (
 	"context"
-	"sort"
 
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
@@ -44,14 +43,14 @@ func (s *SSM) read(ctx context.Context, ref provider.Reference) (secret.Value, e
 
 func (s *SSM) WriteMany(ctx context.Context, writes []provider.Write) (provider.Receipt, error) {
 	provider.SortedWrites(writes)
-	completed := make([]string, 0, len(writes))
+	completed := make([]provider.Write, 0, len(writes))
 	for _, write := range writes {
 		if err := s.write(ctx, write); err != nil {
-			return provider.Receipt{Completed: completed}, err
+			return provider.Receipt{Completed: provider.Environments(completed)}, err
 		}
-		completed = append(completed, write.Environment)
+		completed = append(completed, write)
 	}
-	return provider.Receipt{Completed: completed}, nil
+	return provider.Receipt{Completed: provider.Environments(completed)}, nil
 }
 
 func (s *SSM) write(ctx context.Context, write provider.Write) error {
@@ -65,13 +64,4 @@ func (s *SSM) write(ctx context.Context, write provider.Write) error {
 		return remoteError(err)
 	}
 	return nil
-}
-
-func environments(writes []provider.Write) []string {
-	result := make([]string, 0, len(writes))
-	for _, write := range writes {
-		result = append(result, write.Environment)
-	}
-	sort.Strings(result)
-	return result
 }

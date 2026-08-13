@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"math/big"
 	"time"
 
 	sm "github.com/aws/aws-sdk-go-v2/service/secretsmanager"
@@ -88,7 +87,7 @@ func (s *Secrets) WriteMany(ctx context.Context, writes []provider.Write) (provi
 				return provider.Receipt{}, err
 			}
 			if _, err = s.C.CreateSecret(ctx, &sm.CreateSecretInput{Name: &id, SecretString: &payload}); err == nil {
-				return provider.Receipt{Completed: environments(writes)}, nil
+				return provider.Receipt{Completed: provider.Environments(writes)}, nil
 			}
 			var exists *smtypes.ResourceExistsException
 			if !errors.As(err, &exists) {
@@ -128,9 +127,9 @@ func (s *Secrets) WriteMany(ctx context.Context, writes []provider.Write) (provi
 		_, promoteErr := s.C.UpdateSecretVersionStage(ctx, &sm.UpdateSecretVersionStageInput{SecretId: &id, VersionStage: stringPtr("AWSCURRENT"), MoveToVersionId: &version, RemoveFromVersionId: out.VersionId})
 		if promoteErr == nil {
 			if err := s.removePending(ctx, id, stage, version); err != nil {
-				return provider.Receipt{}, err
+				return provider.Receipt{Completed: provider.Environments(writes)}, err
 			}
-			return provider.Receipt{Completed: environments(writes)}, nil
+			return provider.Receipt{Completed: provider.Environments(writes)}, nil
 		}
 		current, observeErr := s.C.GetSecretValue(ctx, &sm.GetSecretValueInput{SecretId: &id})
 		if observeErr != nil || current == nil || current.VersionId == nil {
@@ -139,15 +138,28 @@ func (s *Secrets) WriteMany(ctx context.Context, writes []provider.Write) (provi
 			}
 			return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
 		}
-		if err := s.removePending(ctx, id, stage, version); err != nil {
-			return provider.Receipt{}, err
-		}
+		cleanupErr := s.removePending(ctx, id, stage, version)
 		switch *current.VersionId {
 		case version:
-			return provider.Receipt{Completed: environments(writes)}, nil
+			if cleanupErr != nil {
+				return provider.Receipt{Completed: provider.Environments(writes)}, cleanupErr
+			}
+			return provider.Receipt{Completed: provider.Environments(writes)}, nil
 		case *out.VersionId:
-			return provider.Receipt{}, remoteError(promoteErr)
+			if cleanupErr != nil {
+				return provider.Receipt{}, cleanupErr
+			}
+			if attempt == maxWriteAttempts-1 {
+				return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
+			}
+			if err := s.waitBeforeRetry(ctx, attempt); err != nil {
+				return provider.Receipt{}, err
+			}
+			continue
 		default:
+			if cleanupErr != nil {
+				return provider.Receipt{}, cleanupErr
+			}
 			if attempt == maxWriteAttempts-1 {
 				return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
 			}
@@ -169,36 +181,7 @@ func (s *Secrets) removePending(ctx context.Context, id, stage, version string) 
 }
 
 func (s *Secrets) waitBeforeRetry(ctx context.Context, attempt int) error {
-	ceiling := 200 * time.Millisecond * time.Duration(1<<attempt)
-	if ceiling > 2*time.Second {
-		ceiling = 2 * time.Second
-	}
-	delay := randomDelay(ceiling)
-	if s.jitter != nil {
-		delay = s.jitter(ceiling)
-	}
-	if s.wait != nil {
-		if err := s.wait(ctx, delay); err != nil {
-			return &provider.Error{Kind: provider.Indeterminate}
-		}
-		return nil
-	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return &provider.Error{Kind: provider.Indeterminate}
-	case <-timer.C:
-		return nil
-	}
-}
-
-func randomDelay(ceiling time.Duration) time.Duration {
-	n, err := rand.Int(rand.Reader, big.NewInt(int64(ceiling)+1))
-	if err != nil {
-		return 0
-	}
-	return time.Duration(n.Int64())
+	return provider.WaitBeforeRetry(ctx, attempt, s.wait, s.jitter)
 }
 func payloadFor(existing *string, writes []provider.Write) (string, error) {
 	if writes[0].Reference.Blob() {

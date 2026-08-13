@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"sort"
+	"sync"
 
 	"github.com/cntryl/uno/internal/core/provider"
 	"github.com/cntryl/uno/internal/core/secret"
@@ -65,6 +66,7 @@ func groupDestinations(mappings []Mapping, values map[string]secret.Value) []des
 type adapterCache struct {
 	registry *provider.Registry
 	values   map[string]provider.Adapter
+	mu       sync.Mutex
 }
 
 func newAdapterCache(registry *provider.Registry) *adapterCache {
@@ -72,6 +74,8 @@ func newAdapterCache(registry *provider.Registry) *adapterCache {
 }
 
 func (c *adapterCache) get(ctx context.Context, ref provider.Reference) (provider.Adapter, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	key := ref.AdapterKey
 	if key == "" {
 		key = ref.Scheme + "\x00" + ref.Region

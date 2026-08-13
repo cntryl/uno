@@ -162,3 +162,12 @@ func SortedWrites(w []Write) {
 		return w[i].Environment < w[j].Environment
 	})
 }
+
+func Environments(writes []Write) []string {
+	result := make([]string, 0, len(writes))
+	for _, write := range writes {
+		result = append(result, write.Environment)
+	}
+	sort.Strings(result)
+	return result
+}

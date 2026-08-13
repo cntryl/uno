@@ -20,6 +20,8 @@ type fakeAPI struct {
 	putFailures    int
 	putVersions    []uint32
 	typedConflicts bool
+	vaultLists     int
+	itemLists      int
 }
 
 type fakeVersionConflictError struct{}
@@ -27,9 +29,15 @@ type fakeVersionConflictError struct{}
 func (fakeVersionConflictError) Error() string         { return "conflict" }
 func (fakeVersionConflictError) VersionConflict() bool { return true }
 
-func (f *fakeAPI) ListVaults(context.Context) ([]op.VaultOverview, error)       { return f.vaults, nil }
-func (f *fakeAPI) ListItems(context.Context, string) ([]op.ItemOverview, error) { return f.items, nil }
-func (f *fakeAPI) GetItem(context.Context, string, string) (op.Item, error)     { return f.item, nil }
+func (f *fakeAPI) ListVaults(context.Context) ([]op.VaultOverview, error) {
+	f.vaultLists++
+	return f.vaults, nil
+}
+func (f *fakeAPI) ListItems(context.Context, string) ([]op.ItemOverview, error) {
+	f.itemLists++
+	return f.items, nil
+}
+func (f *fakeAPI) GetItem(context.Context, string, string) (op.Item, error) { return f.item, nil }
 func (f *fakeAPI) CreateItem(_ context.Context, p op.ItemCreateParams) (op.Item, error) {
 	f.created = p
 	return op.Item{ID: "new"}, nil
@@ -182,7 +190,7 @@ func TestGroupedUpdatePreservesFieldsAndSections(t *testing.T) {
 	}
 }
 
-func TestWriteRejectsNonConcealedFieldCollision(t *testing.T) {
+func TestWriteIgnoresNonConcealedFieldCollisionLikeRead(t *testing.T) {
 	fake := baseFake()
 	fake.item.Fields[1] = op.ItemField{
 		ID:        "MY_API_KEY",
@@ -198,15 +206,35 @@ func TestWriteRejectsNonConcealedFieldCollision(t *testing.T) {
 	}}
 
 	_, err := NewWithAPI(fake).WriteMany(context.Background(), writes)
-	var typed *provider.Error
-	if !errors.As(err, &typed) || typed.Kind != provider.Ambiguous {
-		t.Fatalf("err=%v", err)
-	}
-	if fake.puts != 0 {
-		t.Fatalf("puts=%d", fake.puts)
-	}
-	if len(fake.item.Fields) != 2 {
+	if err != nil || fake.puts != 1 || len(fake.item.Fields) != 3 || fake.item.Fields[2].FieldType != op.ItemFieldTypeConcealed {
 		t.Fatalf("fields=%#v", fake.item.Fields)
+	}
+}
+
+func TestNewSectionIDDoesNotCollideWithExistingIDs(t *testing.T) {
+	fake := baseFake()
+	fake.item.Sections = []op.ItemSection{{ID: "uno-1", Title: "existing"}}
+	write := provider.Write{Environment: "KEY", Reference: provider.Reference{Region: "Production", Container: "service", Key: "new/KEY"}, Value: secret.New("new")}
+	if _, err := NewWithAPI(fake).WriteMany(context.Background(), []provider.Write{write}); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.item.Sections[1].ID; got == "uno-1" {
+		t.Fatalf("colliding section ID %q", got)
+	}
+}
+
+func TestAdapterCachesVaultAndItemListings(t *testing.T) {
+	fake := baseFake()
+	a := NewWithAPI(fake)
+	refs := []provider.Reference{{Region: "Production", Container: "service"}}
+	if _, err := a.ReadMany(context.Background(), refs); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.ReadMany(context.Background(), refs); err != nil {
+		t.Fatal(err)
+	}
+	if fake.vaultLists != 1 || fake.itemLists != 1 {
+		t.Fatalf("vault lists=%d item lists=%d", fake.vaultLists, fake.itemLists)
 	}
 }
 

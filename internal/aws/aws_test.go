@@ -133,11 +133,44 @@ func TestPromotionFailureWhoseCandidateIsCurrentSucceedsAfterCleanup(t *testing.
 func TestPendingCleanupFailureHasDistinctSafeKind(t *testing.T) {
 	fake := &promotionFake{current: "original", cleanupFailures: 1}
 	write := provider.Write{Environment: "MY_API_KEY", Reference: provider.Reference{Container: "secret", Key: "key"}, Value: secret.New("new")}
-	_, err := (&Secrets{C: fake}).WriteMany(context.Background(), []provider.Write{write})
+	receipt, err := (&Secrets{C: fake}).WriteMany(context.Background(), []provider.Write{write})
 	var typed *provider.Error
-	if !errors.As(err, &typed) || typed.Kind != provider.PendingCleanupFailed || fake.cleanups != 1 {
-		t.Fatalf("cleanups=%d err=%v", fake.cleanups, err)
+	if !errors.As(err, &typed) || typed.Kind != provider.PendingCleanupFailed || fake.cleanups != 1 || !reflect.DeepEqual(receipt.Completed, []string{"MY_API_KEY"}) {
+		t.Fatalf("receipt=%v cleanups=%d err=%v", receipt, fake.cleanups, err)
 	}
+}
+
+func TestObservedSuccessfulPromotionReportsCompletedWhenCleanupFails(t *testing.T) {
+	fake := &promotionFake{current: "original", promoteFailures: 1, cleanupFailures: 1}
+	write := provider.Write{Environment: "MY_API_KEY", Reference: provider.Reference{Container: "secret", Key: "key"}, Value: secret.New("new")}
+	receipt, err := (&Secrets{C: fake}).WriteMany(context.Background(), []provider.Write{write})
+	var typed *provider.Error
+	if !errors.As(err, &typed) || typed.Kind != provider.PendingCleanupFailed || !reflect.DeepEqual(receipt.Completed, []string{"MY_API_KEY"}) {
+		t.Fatalf("receipt=%v err=%v", receipt, err)
+	}
+}
+
+func TestUnchangedCurrentAfterPromotionErrorConsumesRetryBudget(t *testing.T) {
+	fake := &promotionFake{current: "original", promoteFailures: 1}
+	fake.thirdPartyConflict = false
+	fake.candidate = "prevent-auto-current"
+	waits := 0
+	adapter := &Secrets{C: &unchangedPromotionFake{promotionFake: fake}, jitter: func(time.Duration) time.Duration { return 0 }, wait: func(context.Context, time.Duration) error { waits++; return nil }}
+	write := provider.Write{Environment: "MY_API_KEY", Reference: provider.Reference{Container: "secret", Key: "key"}, Value: secret.New("new")}
+	receipt, err := adapter.WriteMany(context.Background(), []provider.Write{write})
+	if err != nil || !reflect.DeepEqual(receipt.Completed, []string{"MY_API_KEY"}) || waits != 1 || fake.promotes != 2 {
+		t.Fatalf("receipt=%v waits=%d promotes=%d err=%v", receipt, waits, fake.promotes, err)
+	}
+}
+
+type unchangedPromotionFake struct{ *promotionFake }
+
+func (f *unchangedPromotionFake) UpdateSecretVersionStage(ctx context.Context, in *sm.UpdateSecretVersionStageInput, opts ...func(*sm.Options)) (*sm.UpdateSecretVersionStageOutput, error) {
+	if *in.VersionStage == "AWSCURRENT" && f.promotes == 0 {
+		f.promotes++
+		return nil, errors.New("transient promotion failure")
+	}
+	return f.promotionFake.UpdateSecretVersionStage(ctx, in, opts...)
 }
 
 func TestAmbiguousPromotionCleanupFailureHasDistinctSafeKind(t *testing.T) {

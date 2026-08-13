@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/cntryl/uno/internal/core/provider"
 	"github.com/cntryl/uno/internal/core/secret"
@@ -130,6 +132,72 @@ func TestSourceFailurePreventsEveryWriteAndRedacts(t *testing.T) {
 	_, err := Sync(context.Background(), p)
 	if err == nil || len(adapter.writes) != 0 || stringsContains(err.Error(), "leaked") {
 		t.Fatalf("writes=%v err=%v", adapter.writes, err)
+	}
+}
+
+type concurrentAdapter struct {
+	mu           sync.Mutex
+	readStarted  int
+	writeStarted int
+	readRelease  chan struct{}
+	writeRelease chan struct{}
+}
+
+func (a *concurrentAdapter) ReadMany(_ context.Context, refs []provider.Reference) (map[string]secret.Value, error) {
+	a.mu.Lock()
+	a.readStarted++
+	if a.readStarted == 2 {
+		close(a.readRelease)
+	}
+	a.mu.Unlock()
+	select {
+	case <-a.readRelease:
+	case <-time.After(time.Second):
+		return nil, errors.New("source groups were sequential")
+	}
+	return map[string]secret.Value{refs[0].Binding(): secret.New("value")}, nil
+}
+
+func (a *concurrentAdapter) WriteMany(_ context.Context, writes []provider.Write) (provider.Receipt, error) {
+	a.mu.Lock()
+	a.writeStarted++
+	if a.writeStarted == 2 {
+		close(a.writeRelease)
+	}
+	a.mu.Unlock()
+	select {
+	case <-a.writeRelease:
+	case <-time.After(time.Second):
+		return provider.Receipt{}, errors.New("destination groups were sequential")
+	}
+	return provider.Receipt{Completed: provider.Environments(writes)}, nil
+}
+
+type concurrentFactory struct{ adapter *concurrentAdapter }
+
+func (f concurrentFactory) Parse(raw string) (provider.Reference, error) {
+	parts := stringsSplit(raw)
+	return provider.Reference{Scheme: parts[0], Container: parts[1], Key: parts[2]}, nil
+}
+func (f concurrentFactory) Adapter(context.Context, provider.Reference) (provider.Adapter, error) {
+	return f.adapter, nil
+}
+
+func TestSyncRunsIndependentSourceAndDestinationGroupsConcurrently(t *testing.T) {
+	adapter := &concurrentAdapter{readRelease: make(chan struct{}), writeRelease: make(chan struct{})}
+	file, err := tpl.ParseEnv("A=parallel://s1/a -> parallel://d1/a\nB=parallel://s2/b -> parallel://d2/b\n", func(string) (string, bool) { return "", false })
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := provider.NewRegistry()
+	registry.Register("parallel", concurrentFactory{adapter})
+	plan, err := Bind(file, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := Sync(context.Background(), plan)
+	if err != nil || fmt.Sprint(receipt.Completed) != "[A B]" {
+		t.Fatalf("receipt=%v err=%v", receipt, err)
 	}
 }
 func stringsContains(s, sub string) bool {

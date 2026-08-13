@@ -9,7 +9,7 @@ func safeChildEnvironment(environment, capabilityPrefixes []string) []string {
 		if ok {
 			denied := false
 			for _, prefix := range capabilityPrefixes {
-				if strings.HasPrefix(key, prefix) {
+				if len(key) >= len(prefix) && strings.EqualFold(key[:len(prefix)], prefix) {
 					denied = true
 					break
 				}
