@@ -267,6 +267,29 @@ func TestUnknownGlobalFlagIsReportedBeforeCommandDiscovery(t *testing.T) {
 	}
 }
 
+func TestRunTreatsDoubleDashAsGlobalFlagValueBeforeSeparator(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile("--", []byte("VALUE=fake://source -> fake://target\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &cliAdapter{}
+	code, err := executeWithRegistry(context.Background(), []string{"run", "--template", "--", "--", "/usr/bin/true"}, cliRegistry(adapter))
+	if err != nil || code != 0 || adapter.reads != 1 {
+		t.Fatalf("code=%d reads=%d err=%v", code, adapter.reads, err)
+	}
+	if _, err := executeWithRegistry(context.Background(), []string{"run", "--template", "--", "/usr/bin/true"}, cliRegistry(&cliAdapter{})); err == nil || err.Error() != "run requires a command after --" {
+		t.Fatalf("missing separator err=%v", err)
+	}
+}
+
+func TestDoubleDashMayPrecedeCommand(t *testing.T) {
+	path := templateFile(t)
+	t.Setenv("UNO_TEMPLATE", path)
+	if _, err := executeWithRegistry(context.Background(), []string{"--", "check"}, cliRegistry(&cliAdapter{})); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func captureStdout(t *testing.T, action func()) string {
 	t.Helper()
 	old := os.Stdout

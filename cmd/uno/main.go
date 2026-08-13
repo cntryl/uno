@@ -55,9 +55,12 @@ func executeWithRegistry(ctx context.Context, args []string, providers *provider
 	global.BoolVar(&help, "help", false, "show help")
 	global.BoolVar(&help, "h", false, "show help")
 	global.BoolVar(&showVersion, "version", false, "show version")
-	commandAt := firstCommand(args)
-	if commandAt < 0 {
-		if err := global.Parse(args); err != nil {
+	invocation, err := parseInvocation(args)
+	if err != nil {
+		return 0, err
+	}
+	if invocation.command == "" {
+		if err := global.Parse(invocation.globals); err != nil {
 			return 0, cleanFlagError(err)
 		}
 		if showVersion {
@@ -70,30 +73,14 @@ func executeWithRegistry(ctx context.Context, args []string, providers *provider
 		}
 		return 0, fmt.Errorf("a command is required")
 	}
-	command := args[commandAt]
-	runHasSeparator := false
-	if command == "run" {
-		for _, arg := range args[commandAt+1:] {
-			if arg == "--" {
-				runHasSeparator = true
-				break
-			}
-		}
-	}
-	withoutCommand := make([]string, 0, len(args)-1)
-	withoutCommand = append(withoutCommand, args[:commandAt]...)
-	withoutCommand = append(withoutCommand, args[commandAt+1:]...)
-	globals, commandArgs, err := extractGlobalFlags(withoutCommand, command == "run" && runHasSeparator)
-	if err != nil {
-		return 0, err
-	}
-	if err := global.Parse(globals); err != nil {
+	command, commandArgs := invocation.command, invocation.commandArgs
+	if err := global.Parse(invocation.globals); err != nil {
 		return 0, cleanFlagError(err)
 	}
 	if a.timeout <= 0 {
 		return 0, fmt.Errorf("invalid arguments: timeout must be greater than zero")
 	}
-	if (help || showVersion) && (command != "run" || runHasSeparator || len(commandArgs) == 0) {
+	if (help || showVersion) && (command != "run" || invocation.runHasSeparator || len(commandArgs) == 0) {
 		if showVersion {
 			fmt.Printf("uno %s\n", version)
 		} else {
@@ -101,7 +88,7 @@ func executeWithRegistry(ctx context.Context, args []string, providers *provider
 		}
 		return 0, nil
 	}
-	if command == "run" && (!runHasSeparator || len(commandArgs) < 2 || commandArgs[0] != "--") {
+	if command == "run" && (!invocation.runHasSeparator || len(commandArgs) < 2 || commandArgs[0] != "--") {
 		return 0, fmt.Errorf("run requires a command after --")
 	}
 	plan, err := a.load()
@@ -241,52 +228,74 @@ func (a *app) load() (*engine.Plan, error) {
 	}
 	return plan, nil
 }
-func firstCommand(args []string) int {
+
+type invocation struct {
+	command         string
+	globals         []string
+	commandArgs     []string
+	runHasSeparator bool
+}
+
+func parseInvocation(args []string) (invocation, error) {
+	var parsed invocation
+	globalOptionsEnded := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		if arg == "--template" || arg == "--timeout" {
-			i++
+		if parsed.command == "" {
+			if !globalOptionsEnded && arg == "--" {
+				globalOptionsEnded = true
+				continue
+			}
+			if !globalOptionsEnded {
+				if values, ok := globalFlagValues(arg); ok {
+					parsed.globals = append(parsed.globals, arg)
+					if values == 1 {
+						if i+1 >= len(args) {
+							return invocation{}, fmt.Errorf("invalid arguments: flag needs an argument: %s", arg)
+						}
+						i++
+						parsed.globals = append(parsed.globals, args[i])
+					}
+					continue
+				}
+				if strings.HasPrefix(arg, "-") {
+					return invocation{}, fmt.Errorf("invalid arguments: flag provided but not defined: -%s", strings.TrimLeft(arg, "-"))
+				}
+			}
+			parsed.command = arg
 			continue
 		}
-		if arg == "--help" || arg == "-h" || arg == "--version" || strings.HasPrefix(arg, "--template=") || strings.HasPrefix(arg, "--timeout=") {
+
+		if arg == "--" {
+			parsed.commandArgs = append(parsed.commandArgs, args[i:]...)
+			parsed.runHasSeparator = parsed.command == "run"
+			return parsed, nil
+		}
+		if values, ok := globalFlagValues(arg); ok {
+			parsed.globals = append(parsed.globals, arg)
+			if values == 1 {
+				if i+1 >= len(args) {
+					return invocation{}, fmt.Errorf("invalid arguments: flag needs an argument: %s", arg)
+				}
+				i++
+				parsed.globals = append(parsed.globals, args[i])
+			}
 			continue
 		}
-		if strings.HasPrefix(arg, "-") {
-			return -1
-		}
-		return i
+		parsed.commandArgs = append(parsed.commandArgs, arg)
 	}
-	return -1
+	return parsed, nil
 }
-func extractGlobalFlags(args []string, run bool) ([]string, []string, error) {
-	separator := len(args)
-	if run {
-		for i, arg := range args {
-			if arg == "--" {
-				separator = i
-				break
-			}
-		}
+
+func globalFlagValues(arg string) (int, bool) {
+	switch {
+	case arg == "--template" || arg == "--timeout":
+		return 1, true
+	case arg == "--help" || arg == "-h" || arg == "--version" || strings.HasPrefix(arg, "--template=") || strings.HasPrefix(arg, "--timeout="):
+		return 0, true
+	default:
+		return 0, false
 	}
-	before, after := args[:separator], args[separator:]
-	globals, remaining := []string{}, []string{}
-	for i := 0; i < len(before); i++ {
-		arg := before[i]
-		if arg == "--help" || arg == "-h" || arg == "--version" || strings.HasPrefix(arg, "--template=") || strings.HasPrefix(arg, "--timeout=") {
-			globals = append(globals, arg)
-			continue
-		}
-		if arg == "--template" || arg == "--timeout" {
-			if i+1 >= len(before) {
-				return nil, nil, fmt.Errorf("invalid arguments: flag needs an argument: %s", arg)
-			}
-			globals = append(globals, arg, before[i+1])
-			i++
-			continue
-		}
-		remaining = append(remaining, arg)
-	}
-	return globals, append(remaining, after...), nil
 }
 func cleanFlagError(err error) error { return fmt.Errorf("invalid arguments: %w", err) }
 func printReceipt(receipt engine.Receipt, err error) {
