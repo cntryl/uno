@@ -31,9 +31,9 @@ describe('package metadata', () => {
     }
   });
 
-  test('should keep the go and npm release versions aligned given main.go and package.json', () => {
-    const source = readFileSync(path.join(repositoryRoot, 'cmd/uno/main.go'), 'utf8');
-    const goVersion = source.match(/^const version = "([^"]+)"$/m)?.[1];
+  test('should keep the centralized go and npm release versions aligned', () => {
+    const source = readFileSync(path.join(repositoryRoot, 'internal/version/version.go'), 'utf8');
+    const goVersion = source.match(/^const Current = "([^"]+)"$/m)?.[1];
     expect(goVersion).toBe(packageJson.version);
   });
 });

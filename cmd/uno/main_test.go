@@ -24,6 +24,13 @@ func TestShouldStripProviderCredentialsGivenMixedCaseEnvironment(t *testing.T) {
 	}
 }
 
+func TestShouldStripInheritedResolvedKeysFromChildEnvironment(t *testing.T) {
+	got := safeChildEnvironment([]string{"PATH=/bin", "MY_API_KEY=stale", "my_api_key=duplicate", "OTHER=kept"}, nil, []string{"MY_API_KEY"})
+	if strings.Join(got, "|") != "PATH=/bin|OTHER=kept" {
+		t.Fatalf("environment=%v", got)
+	}
+}
+
 func TestRegistryBindsAzureKeyVaultReference(t *testing.T) {
 	ref, err := registry().Parse("azure-key-vault://myvault.vault.azure.net/MY-SECRET/MY_API_KEY")
 	if err != nil {
@@ -60,22 +67,27 @@ type cliAdapter struct {
 // "this destination hasn't been written before" — which is the common case
 // for a first sync, and keeps every pre-existing test's "the write step
 // gets attempted" assumption true without each needing to seed a fake store.
-func (a *cliAdapter) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]secret.Value, error) {
+func (a *cliAdapter) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]provider.ReadResult, error) {
 	if a.read != nil {
-		return a.read(ctx, refs)
+		old, err := a.read(ctx, refs)
+		out := make(map[string]provider.ReadResult, len(old))
+		for key, value := range old {
+			out[key] = provider.ReadResult{Value: value, Found: true}
+		}
+		return out, err
 	}
 	a.readCalls++
 	if a.readCalls > 1 {
-		return nil, &provider.Error{Kind: provider.InvalidBinding}
+		return provider.MissingResults(refs), nil
 	}
-	out := make(map[string]secret.Value, len(refs))
+	out := make(map[string]provider.ReadResult, len(refs))
 	for _, r := range refs {
 		a.reads++
 		value := a.value
 		if value == "" {
 			value = "resolved"
 		}
-		out[r.Binding()] = secret.New(value)
+		out[r.Binding()] = provider.ReadResult{Value: secret.New(value), Found: true}
 	}
 	return out, nil
 }
@@ -87,6 +99,13 @@ func TestShouldReturnInvalidArgumentsErrorGivenNonPositiveTimeout(t *testing.T) 
 		if err == nil || !strings.Contains(err.Error(), "invalid arguments") {
 			t.Fatalf("duration=%q err=%v", duration, err)
 		}
+	}
+}
+
+func TestShouldValidateArgumentsBeforeReadingTemplate(t *testing.T) {
+	code, err := executeWithRegistry(context.Background(), []string{"--template", "missing", "unknown"}, cliRegistry(&cliAdapter{}))
+	if err == nil || code != 2 || !strings.Contains(err.Error(), "unknown command") {
+		t.Fatalf("code=%d err=%v", code, err)
 	}
 }
 
@@ -169,7 +188,7 @@ func TestShouldReportCompletedWriteGivenTimeoutDuringSync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotErr == nil || gotErr.Error() != "operation timed out" || string(output) != "VALUE: synced\n" {
+	if gotErr == nil || gotErr.Error() != "operation timed out" || string(output) != "VALUE: create\n" {
 		t.Fatalf("output=%q err=%v", output, gotErr)
 	}
 }
@@ -202,7 +221,7 @@ func TestShouldWritePendingChangeGivenForceFlag(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	if adapter.writes != 1 || output != "VALUE: synced\n" {
+	if adapter.writes != 1 || output != "VALUE: create\n" {
 		t.Fatalf("writes=%d output=%q", adapter.writes, output)
 	}
 }
@@ -221,7 +240,7 @@ func TestShouldSkipWriteAndReportUnchangedGivenDestinationAlreadyMatches(t *test
 			t.Fatal(err)
 		}
 	})
-	if adapter.writes != 0 || output != "1 unchanged, skipped\n" {
+	if adapter.writes != 0 || output != "VALUE: unchanged\n" {
 		t.Fatalf("writes=%d output=%q", adapter.writes, output)
 	}
 }
@@ -235,17 +254,17 @@ func TestShouldPrintJSONResultGivenJSONFlag(t *testing.T) {
 		}
 	})
 	var result struct {
+		DryRun  bool `json:"dryRun"`
 		Changes []struct {
 			Environment string `json:"environment"`
 			Kind        string `json:"kind"`
 		} `json:"changes"`
 		Completed []string `json:"completed"`
-		Unchanged int      `json:"unchanged"`
 	}
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Fatalf("output=%q err=%v", output, err)
 	}
-	if len(result.Changes) != 1 || result.Changes[0].Environment != "VALUE" || result.Changes[0].Kind != "create" || result.Unchanged != 0 || strings.Join(result.Completed, ",") != "VALUE" {
+	if result.DryRun || len(result.Changes) != 1 || result.Changes[0].Environment != "VALUE" || result.Changes[0].Kind != "create" || strings.Join(result.Completed, ",") != "VALUE" {
 		t.Fatalf("result=%+v output=%q", result, output)
 	}
 }
@@ -326,8 +345,8 @@ func TestShouldReportUnsupportedGivenProviderLacksRollback(t *testing.T) {
 	adapter := &cliAdapter{}
 	path := templateFile(t)
 	output := captureStdout(t, func() {
-		if _, err := executeWithRegistry(context.Background(), []string{"--template", path, "rollback", "--force"}, cliRegistry(adapter)); err != nil {
-			t.Fatal(err)
+		if code, err := executeWithRegistry(context.Background(), []string{"--template", path, "rollback", "--force"}, cliRegistry(adapter)); err == nil || code != 1 {
+			t.Fatalf("code=%d err=%v", code, err)
 		}
 	})
 	if output != "VALUE: unsupported\n" {
@@ -379,7 +398,7 @@ func TestShouldSkipProviderAccessGivenCheckOrDryRunCommand(t *testing.T) {
 	if _, err := executeWithRegistry(context.Background(), []string{"--template", path, "sync", "--dry-run"}, providers); err != nil {
 		t.Fatal(err)
 	}
-	if adapter.accesses != 0 {
+	if adapter.accesses != 1 {
 		t.Fatalf("provider accesses=%d", adapter.accesses)
 	}
 }

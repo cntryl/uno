@@ -46,19 +46,29 @@ func (s *sdkClient) ListSecretVersions(ctx context.Context, name string) ([]azse
 
 type KeyVault struct{ C Client }
 
-func (a *KeyVault) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]secret.Value, error) {
+func (a *KeyVault) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]provider.ReadResult, error) {
+	if err := provider.ValidateReadGroup(refs); err != nil {
+		return nil, err
+	}
 	if len(refs) == 0 {
 		return nil, nil
 	}
 	response, err := a.C.GetSecret(ctx, refs[0].Container, "")
 	if err != nil {
+		var responseError *azcore.ResponseError
+		if errors.As(err, &responseError) && responseError.StatusCode == http.StatusNotFound {
+			return provider.MissingResults(refs), nil
+		}
 		return nil, remoteError(err)
 	}
 	if response.Value == nil {
 		return nil, &provider.Error{Kind: provider.InvalidState}
 	}
-	values := make(map[string]secret.Value, len(refs))
-	fail := func(err error) (map[string]secret.Value, error) { secret.DestroyMap(values); return nil, err }
+	values := make(map[string]provider.ReadResult, len(refs))
+	fail := func(err error) (map[string]provider.ReadResult, error) {
+		provider.DestroyReadResults(values)
+		return nil, err
+	}
 	var doc map[string]json.RawMessage
 	parsed := false
 	for _, ref := range refs {
@@ -66,7 +76,7 @@ func (a *KeyVault) ReadMany(ctx context.Context, refs []provider.Reference) (map
 			return fail(&provider.Error{Kind: provider.InvalidBinding})
 		}
 		if ref.Blob() {
-			values[ref.Binding()] = secret.New(*response.Value)
+			values[ref.Binding()] = provider.ReadResult{Value: secret.New(*response.Value), Found: true}
 			continue
 		}
 		if !parsed {
@@ -76,19 +86,26 @@ func (a *KeyVault) ReadMany(ctx context.Context, refs []provider.Reference) (map
 			parsed = true
 		}
 		raw, ok := doc[ref.Key]
-		if !ok || string(raw) == "null" {
-			return fail(&provider.Error{Kind: provider.InvalidBinding})
+		if !ok {
+			values[ref.Binding()] = provider.ReadResult{}
+			continue
+		}
+		if string(raw) == "null" {
+			return fail(&provider.Error{Kind: provider.InvalidState})
 		}
 		var value string
 		if json.Unmarshal(raw, &value) != nil {
 			return fail(&provider.Error{Kind: provider.InvalidState})
 		}
-		values[ref.Binding()] = secret.New(value)
+		values[ref.Binding()] = provider.ReadResult{Value: secret.New(value), Found: true}
 	}
 	return values, nil
 }
 
 func (a *KeyVault) WriteMany(ctx context.Context, writes []provider.Write) (provider.Receipt, error) {
+	if err := provider.ValidateWriteGroup(writes); err != nil {
+		return provider.Receipt{}, err
+	}
 	if len(writes) == 0 {
 		return provider.Receipt{}, nil
 	}

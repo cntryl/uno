@@ -1,8 +1,8 @@
-package main
+package cli
 
 import "strings"
 
-func safeChildEnvironment(environment, capabilityPrefixes []string, resolvedKeys ...[]string) []string {
+func SafeChildEnvironment(environment, capabilityPrefixes []string, resolvedKeys ...[]string) []string {
 	resolved := map[string]bool{}
 	if len(resolvedKeys) > 0 {
 		for _, key := range resolvedKeys[0] {

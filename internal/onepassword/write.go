@@ -14,6 +14,9 @@ const conflictRetries = 3
 type versionConflict interface{ VersionConflict() bool }
 
 func (a *Adapter) WriteMany(ctx context.Context, writes []provider.Write) (provider.Receipt, error) {
+	if err := provider.ValidateWriteGroup(writes); err != nil {
+		return provider.Receipt{}, err
+	}
 	if len(writes) == 0 {
 		return provider.Receipt{}, nil
 	}
@@ -34,17 +37,17 @@ func (a *Adapter) WriteMany(ctx context.Context, writes []provider.Write) (provi
 		} else {
 			var conflict versionConflict
 			if !errors.As(err, &conflict) || !conflict.VersionConflict() {
-				return provider.Receipt{}, remote()
+				return provider.Receipt{}, remote(err)
 			}
 			if attempt == conflictRetries {
-				return provider.Receipt{}, remote()
+				return provider.Receipt{}, remote(err)
 			}
 			if err := a.waitBeforeRetry(ctx, attempt); err != nil {
 				return provider.Receipt{}, err
 			}
 		}
 	}
-	return provider.Receipt{}, remote()
+	return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
 }
 
 func validateDestination(item *op.Item) error {

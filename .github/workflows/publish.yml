@@ -47,8 +47,11 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: '24.15.0'
-          cache: npm
           registry-url: https://registry.npmjs.org
+
+      - name: Bootstrap npm
+        working-directory: ${{ runner.temp }}
+        run: npm install --global npm@12.0.2
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v4.1.2

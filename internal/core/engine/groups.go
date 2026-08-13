@@ -96,8 +96,8 @@ func newAdapterCache(registry *provider.Registry) *adapterCache {
 // unrelated provider/region groups can be built concurrently instead of
 // serializing on one lock.
 func (c *adapterCache) get(ctx context.Context, ref provider.Reference) (provider.Adapter, error) {
-	key := ref.AdapterKey
-	if key == "" {
+	key := ref.Scheme + "\x00" + ref.AdapterKey
+	if ref.AdapterKey == "" {
 		key = ref.Scheme + "\x00" + ref.Region
 	}
 	c.mu.Lock()

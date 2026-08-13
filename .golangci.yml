@@ -40,7 +40,7 @@ linters:
   exclusions:
     rules:
       # `run` intentionally executes the exact argv supplied by the user.
-      - path: cmd/uno/main.go
+      - path: internal/cli/cli.go
         text: 'G(204|702):'
         linters: [gosec]
       # The URL is synthetic parser-test data, not a credential.

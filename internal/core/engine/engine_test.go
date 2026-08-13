@@ -20,6 +20,29 @@ func (f fakeFactory) Parse(raw string) (provider.Reference, error) {
 	parts := stringsSplit(raw)
 	return provider.Reference{Scheme: parts[0], Container: parts[1], Key: parts[2]}, nil
 }
+
+type fixedFactory struct{ adapter provider.Adapter }
+
+func (f fixedFactory) Parse(string) (provider.Reference, error) { return provider.Reference{}, nil }
+func (f fixedFactory) Adapter(context.Context, provider.Reference) (provider.Adapter, error) {
+	return f.adapter, nil
+}
+
+func TestShouldNamespaceAdapterKeysByProviderFamily(t *testing.T) {
+	first, second := &fakeAdapter{}, &fakeAdapter{}
+	registry := provider.NewRegistry()
+	registry.Register("first", fixedFactory{adapter: first})
+	registry.Register("second", fixedFactory{adapter: second})
+	cache := newAdapterCache(registry)
+	a, err := cache.get(context.Background(), provider.Reference{Scheme: "first", AdapterKey: "shared"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := cache.get(context.Background(), provider.Reference{Scheme: "second", AdapterKey: "shared"})
+	if err != nil || a == b {
+		t.Fatalf("first=%p second=%p err=%v", a, b, err)
+	}
+}
 func stringsSplit(raw string) []string {
 	i := 0
 	for ; i+2 < len(raw); i++ {
@@ -52,18 +75,27 @@ type fakeAdapter struct {
 	result   func([]provider.Reference) map[string]secret.Value
 }
 
-func (f *fakeAdapter) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]secret.Value, error) {
+func (f *fakeAdapter) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]provider.ReadResult, error) {
 	_ = ctx
 	if f.result != nil {
-		return f.result(refs), nil
+		old := f.result(refs)
+		out := make(map[string]provider.ReadResult, len(old))
+		for key, value := range old {
+			out[key] = provider.ReadResult{Value: value, Found: true}
+		}
+		return out, nil
 	}
-	out := make(map[string]secret.Value, len(refs))
+	out := make(map[string]provider.ReadResult, len(refs))
 	for _, r := range refs {
 		f.reads = append(f.reads, r.Binding())
+		if r.Container == "target" || r.Container == "d" {
+			out[r.Binding()] = provider.ReadResult{}
+			continue
+		}
 		if r.Key == f.failRead {
 			return nil, errors.New("remote leaked secret")
 		}
-		out[r.Binding()] = secret.New(f.values[r.Key])
+		out[r.Binding()] = provider.ReadResult{Value: secret.New(f.values[r.Key]), Found: true}
 	}
 	return out, nil
 }
@@ -92,7 +124,7 @@ func TestShouldFailWithInvalidStateGivenMissingOrUnexpectedResultKeys(t *testing
 	} {
 		adapter := &fakeAdapter{result: result}
 		p := planFor(t, "A=fake://s/a -> fake://d/a\n", adapter)
-		if _, err := Sync(context.Background(), p); err == nil || len(adapter.writes) != 0 || !stringsContains(err.Error(), "InvalidState") {
+		if _, err := Sync(context.Background(), p, SyncOptions{}); err == nil || len(adapter.writes) != 0 || !stringsContains(err.Error(), "InvalidState") {
 			t.Fatalf("writes=%v err=%v", adapter.writes, err)
 		}
 	}
@@ -122,15 +154,15 @@ func planFor(t *testing.T, text string, adapter *fakeAdapter) *Plan {
 func TestShouldGroupWritesAfterResolvingAllSourcesGivenMultipleBindings(t *testing.T) {
 	adapter := &fakeAdapter{values: map[string]string{"a": "one", "b": "two"}}
 	p := planFor(t, "A=fake://source/a -> fake://target/a\nB=fake://source/b -> fake://target/b\n", adapter)
-	receipt, err := Sync(context.Background(), p)
-	if err != nil || len(adapter.reads) != 2 || len(adapter.writes) != 1 || fmt.Sprint(receipt.Completed) != "[A B]" {
-		t.Fatalf("receipt=%#v reads=%v writes=%v err=%v", receipt, adapter.reads, adapter.writes, err)
+	result, err := Sync(context.Background(), p, SyncOptions{})
+	if err != nil || len(adapter.reads) != 4 || len(adapter.writes) != 1 || fmt.Sprint(result.Completed) != "[A B]" {
+		t.Fatalf("result=%#v reads=%v writes=%v err=%v", result, adapter.reads, adapter.writes, err)
 	}
 }
 func TestShouldPreventWritesAndRedactErrorGivenSourceReadFailure(t *testing.T) {
 	adapter := &fakeAdapter{values: map[string]string{"a": "one"}, failRead: "b"}
 	p := planFor(t, "A=fake://s/a -> fake://d/a\nB=fake://s/b -> fake://d/b\n", adapter)
-	_, err := Sync(context.Background(), p)
+	_, err := Sync(context.Background(), p, SyncOptions{})
 	if err == nil || len(adapter.writes) != 0 || stringsContains(err.Error(), "leaked") {
 		t.Fatalf("writes=%v err=%v", adapter.writes, err)
 	}
@@ -144,7 +176,7 @@ type concurrentAdapter struct {
 	writeRelease chan struct{}
 }
 
-func (a *concurrentAdapter) ReadMany(_ context.Context, refs []provider.Reference) (map[string]secret.Value, error) {
+func (a *concurrentAdapter) ReadMany(_ context.Context, refs []provider.Reference) (map[string]provider.ReadResult, error) {
 	a.mu.Lock()
 	a.readStarted++
 	if a.readStarted == 2 {
@@ -156,7 +188,10 @@ func (a *concurrentAdapter) ReadMany(_ context.Context, refs []provider.Referenc
 	case <-time.After(time.Second):
 		return nil, errors.New("source groups were sequential")
 	}
-	return map[string]secret.Value{refs[0].Binding(): secret.New("value")}, nil
+	if refs[0].Container == "d1" || refs[0].Container == "d2" {
+		return provider.MissingResults(refs), nil
+	}
+	return map[string]provider.ReadResult{refs[0].Binding(): {Value: secret.New("value"), Found: true}}, nil
 }
 
 func (a *concurrentAdapter) WriteMany(_ context.Context, writes []provider.Write) (provider.Receipt, error) {
@@ -196,9 +231,9 @@ func TestShouldRunIndependentGroupsConcurrentlyGivenMultipleProviders(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := Sync(context.Background(), plan)
-	if err != nil || fmt.Sprint(receipt.Completed) != "[A B]" {
-		t.Fatalf("receipt=%v err=%v", receipt, err)
+	result, err := Sync(context.Background(), plan, SyncOptions{})
+	if err != nil || fmt.Sprint(result.Completed) != "[A B]" {
+		t.Fatalf("result=%v err=%v", result, err)
 	}
 }
 func TestShouldBoundConcurrencyGivenMoreTasksThanTheLimit(t *testing.T) {
@@ -249,18 +284,28 @@ func TestShouldRejectBindGivenDuplicateDestinationOrBlobKeyMix(t *testing.T) {
 // control the source and destination sides of a mapping independently by
 // giving them distinct containers.
 type diffAdapter struct {
-	values map[string]string
-	writes [][]provider.Write
+	values        map[string]string
+	writes        [][]provider.Write
+	reads         map[string]int
+	failContainer string
 }
 
-func (a *diffAdapter) ReadMany(_ context.Context, refs []provider.Reference) (map[string]secret.Value, error) {
-	out := make(map[string]secret.Value, len(refs))
+func (a *diffAdapter) ReadMany(_ context.Context, refs []provider.Reference) (map[string]provider.ReadResult, error) {
+	if a.reads == nil {
+		a.reads = map[string]int{}
+	}
+	a.reads[refs[0].Container]++
+	if refs[0].Container == a.failContainer {
+		return nil, errors.New("remote leaked detail")
+	}
+	out := make(map[string]provider.ReadResult, len(refs))
 	for _, r := range refs {
 		value, ok := a.values[r.Binding()]
 		if !ok {
-			return nil, &provider.Error{Kind: provider.InvalidBinding}
+			out[r.Binding()] = provider.ReadResult{}
+			continue
 		}
-		out[r.Binding()] = secret.New(value)
+		out[r.Binding()] = provider.ReadResult{Value: secret.New(value), Found: true}
 	}
 	return out, nil
 }
@@ -308,7 +353,8 @@ func TestShouldReportUnchangedGivenDestinationAlreadyMatchesSource(t *testing.T)
 		destinationBinding("d", "a"): "one",
 	}}
 	p := diffPlanFor(t, "A=fake://s/a -> fake://d/a\n", adapter)
-	changes, err := Diff(context.Background(), p)
+	result, err := Sync(context.Background(), p, SyncOptions{DryRun: true})
+	changes := result.Changes
 	if err != nil || len(changes) != 1 || changes[0] != (Change{Environment: "A", Kind: Unchanged}) || len(adapter.writes) != 0 {
 		t.Fatalf("changes=%v writes=%v err=%v", changes, adapter.writes, err)
 	}
@@ -320,7 +366,8 @@ func TestShouldReportUpdateGivenDestinationValueDiffersFromSource(t *testing.T) 
 		destinationBinding("d", "a"): "old",
 	}}
 	p := diffPlanFor(t, "A=fake://s/a -> fake://d/a\n", adapter)
-	changes, err := Diff(context.Background(), p)
+	result, err := Sync(context.Background(), p, SyncOptions{DryRun: true})
+	changes := result.Changes
 	if err != nil || len(changes) != 1 || changes[0] != (Change{Environment: "A", Kind: Update}) {
 		t.Fatalf("changes=%v err=%v", changes, err)
 	}
@@ -329,7 +376,8 @@ func TestShouldReportUpdateGivenDestinationValueDiffersFromSource(t *testing.T) 
 func TestShouldReportCreateGivenDestinationDoesNotExistYet(t *testing.T) {
 	adapter := &diffAdapter{values: map[string]string{destinationBinding("s", "a"): "new"}}
 	p := diffPlanFor(t, "A=fake://s/a -> fake://d/a\n", adapter)
-	changes, err := Diff(context.Background(), p)
+	result, err := Sync(context.Background(), p, SyncOptions{DryRun: true})
+	changes := result.Changes
 	if err != nil || len(changes) != 1 || changes[0] != (Change{Environment: "A", Kind: Create}) {
 		t.Fatalf("changes=%v err=%v", changes, err)
 	}
@@ -342,12 +390,12 @@ func TestShouldSkipWriteAndConfirmGivenEveryMappingUnchanged(t *testing.T) {
 	}}
 	p := diffPlanFor(t, "A=fake://s/a -> fake://d/a\n", adapter)
 	confirmCalled := false
-	changes, receipt, err := SyncChanged(context.Background(), p, func([]Change) (bool, error) {
+	result, err := Sync(context.Background(), p, SyncOptions{Confirm: func([]Change) (bool, error) {
 		confirmCalled = true
 		return true, nil
-	})
-	if err != nil || len(changes) != 1 || changes[0].Kind != Unchanged || len(receipt.Completed) != 0 || len(adapter.writes) != 0 || confirmCalled {
-		t.Fatalf("changes=%v receipt=%v writes=%v confirmCalled=%v err=%v", changes, receipt, adapter.writes, confirmCalled, err)
+	}})
+	if err != nil || len(result.Changes) != 1 || result.Changes[0].Kind != Unchanged || len(result.Completed) != 0 || len(adapter.writes) != 0 || confirmCalled {
+		t.Fatalf("result=%v writes=%v confirmCalled=%v err=%v", result, adapter.writes, confirmCalled, err)
 	}
 }
 
@@ -359,24 +407,37 @@ func TestShouldWriteOnlyPendingMappingsGivenMixedChanges(t *testing.T) {
 	}}
 	p := diffPlanFor(t, "A=fake://s/a -> fake://d/a\nB=fake://s/b -> fake://d/b\n", adapter)
 	var changesAtConfirm []Change
-	changes, receipt, err := SyncChanged(context.Background(), p, func(pending []Change) (bool, error) {
+	result, err := Sync(context.Background(), p, SyncOptions{Confirm: func(pending []Change) (bool, error) {
 		changesAtConfirm = pending
 		return true, nil
-	})
-	if err != nil || fmt.Sprint(receipt.Completed) != "[B]" || len(changesAtConfirm) != 1 || changesAtConfirm[0].Environment != "B" {
-		t.Fatalf("changes=%v receipt=%v confirmed=%v err=%v", changes, receipt, changesAtConfirm, err)
+	}})
+	if err != nil || fmt.Sprint(result.Completed) != "[B]" || len(changesAtConfirm) != 1 || changesAtConfirm[0].Environment != "B" {
+		t.Fatalf("result=%v confirmed=%v err=%v", result, changesAtConfirm, err)
 	}
 	if len(adapter.writes) != 1 || len(adapter.writes[0]) != 1 || adapter.writes[0][0].Environment != "B" {
 		t.Fatalf("writes=%v", adapter.writes)
+	}
+	if adapter.reads["d"] != 1 {
+		t.Fatalf("destination reads=%d", adapter.reads["d"])
+	}
+}
+
+func TestShouldFailClosedBeforeConfirmationGivenDestinationInspectionFailure(t *testing.T) {
+	adapter := &diffAdapter{values: map[string]string{destinationBinding("s", "a"): "new"}, failContainer: "d"}
+	p := diffPlanFor(t, "A=fake://s/a -> fake://d/a\n", adapter)
+	confirmed := false
+	result, err := Sync(context.Background(), p, SyncOptions{Confirm: func([]Change) (bool, error) { confirmed = true; return true, nil }})
+	if err == nil || confirmed || len(adapter.writes) != 0 || stringsContains(err.Error(), "leaked") {
+		t.Fatalf("result=%v confirmed=%v err=%v", result, confirmed, err)
 	}
 }
 
 func TestShouldAbortWithoutWritingGivenConfirmDeclines(t *testing.T) {
 	adapter := &diffAdapter{values: map[string]string{destinationBinding("s", "a"): "new"}}
 	p := diffPlanFor(t, "A=fake://s/a -> fake://d/a\n", adapter)
-	_, receipt, err := SyncChanged(context.Background(), p, func([]Change) (bool, error) { return false, nil })
-	if err == nil || len(receipt.Completed) != 0 || len(adapter.writes) != 0 {
-		t.Fatalf("receipt=%v writes=%v err=%v", receipt, adapter.writes, err)
+	result, err := Sync(context.Background(), p, SyncOptions{Confirm: func([]Change) (bool, error) { return false, nil }})
+	if err == nil || len(result.Completed) != 0 || len(adapter.writes) != 0 {
+		t.Fatalf("result=%v writes=%v err=%v", result, adapter.writes, err)
 	}
 }
 
@@ -384,18 +445,18 @@ func TestShouldPropagateConfirmErrorWithoutWriting(t *testing.T) {
 	adapter := &diffAdapter{values: map[string]string{destinationBinding("s", "a"): "new"}}
 	p := diffPlanFor(t, "A=fake://s/a -> fake://d/a\n", adapter)
 	sentinel := errors.New("confirmation source unavailable")
-	_, receipt, err := SyncChanged(context.Background(), p, func([]Change) (bool, error) { return false, sentinel })
-	if !errors.Is(err, sentinel) || len(receipt.Completed) != 0 || len(adapter.writes) != 0 {
-		t.Fatalf("receipt=%v writes=%v err=%v", receipt, adapter.writes, err)
+	result, err := Sync(context.Background(), p, SyncOptions{Confirm: func([]Change) (bool, error) { return false, sentinel }})
+	if !errors.Is(err, sentinel) || len(result.Completed) != 0 || len(adapter.writes) != 0 {
+		t.Fatalf("result=%v writes=%v err=%v", result, adapter.writes, err)
 	}
 }
 
 func TestShouldWriteWithoutConfirmGivenNilConfirmCallback(t *testing.T) {
 	adapter := &diffAdapter{values: map[string]string{destinationBinding("s", "a"): "new"}}
 	p := diffPlanFor(t, "A=fake://s/a -> fake://d/a\n", adapter)
-	_, receipt, err := SyncChanged(context.Background(), p, nil)
-	if err != nil || fmt.Sprint(receipt.Completed) != "[A]" {
-		t.Fatalf("receipt=%v err=%v", receipt, err)
+	result, err := Sync(context.Background(), p, SyncOptions{})
+	if err != nil || fmt.Sprint(result.Completed) != "[A]" {
+		t.Fatalf("result=%v err=%v", result, err)
 	}
 }
 

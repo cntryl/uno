@@ -34,7 +34,10 @@ type Vault struct {
 	jitter func(time.Duration) time.Duration
 }
 
-func (v *Vault) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]secret.Value, error) {
+func (v *Vault) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]provider.ReadResult, error) {
+	if err := provider.ValidateReadGroup(refs); err != nil {
+		return nil, err
+	}
 	if len(refs) == 0 {
 		return nil, nil
 	}
@@ -43,9 +46,9 @@ func (v *Vault) ReadMany(ctx context.Context, refs []provider.Reference) (map[st
 	if err != nil {
 		return nil, remoteError(err)
 	}
-	values := make(map[string]secret.Value, len(refs))
-	fail := func(err error) (map[string]secret.Value, error) {
-		secret.DestroyMap(values)
+	values := make(map[string]provider.ReadResult, len(refs))
+	fail := func(err error) (map[string]provider.ReadResult, error) {
+		provider.DestroyReadResults(values)
 		return nil, err
 	}
 	for _, ref := range refs {
@@ -53,17 +56,22 @@ func (v *Vault) ReadMany(ctx context.Context, refs []provider.Reference) (map[st
 			return fail(&provider.Error{Kind: provider.InvalidBinding})
 		}
 		if got == nil || got.Data == nil {
-			return fail(&provider.Error{Kind: provider.InvalidBinding})
+			values[ref.Binding()] = provider.ReadResult{}
+			continue
 		}
 		raw, ok := got.Data[ref.Key]
-		if !ok || raw == nil {
-			return fail(&provider.Error{Kind: provider.InvalidBinding})
+		if !ok {
+			values[ref.Binding()] = provider.ReadResult{}
+			continue
+		}
+		if raw == nil {
+			return fail(&provider.Error{Kind: provider.InvalidState})
 		}
 		str, ok := raw.(string)
 		if !ok {
 			return fail(&provider.Error{Kind: provider.InvalidState})
 		}
-		values[ref.Binding()] = secret.New(str)
+		values[ref.Binding()] = provider.ReadResult{Value: secret.New(str), Found: true}
 	}
 	return values, nil
 }
@@ -73,6 +81,9 @@ func (v *Vault) ReadMany(ctx context.Context, refs []provider.Reference) (map[st
 // pinned to the version just read, retrying on a CAS conflict up to
 // maxWriteAttempts times with jittered exponential backoff.
 func (v *Vault) WriteMany(ctx context.Context, writes []provider.Write) (provider.Receipt, error) {
+	if err := provider.ValidateWriteGroup(writes); err != nil {
+		return provider.Receipt{}, err
+	}
 	if len(writes) == 0 {
 		return provider.Receipt{}, nil
 	}
@@ -154,6 +165,9 @@ func isCASConflict(err error) bool {
 }
 
 func remoteError(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
 	if errors.Is(err, vaultapi.ErrSecretNotFound) {
 		return &provider.Error{Kind: provider.InvalidBinding}
 	}

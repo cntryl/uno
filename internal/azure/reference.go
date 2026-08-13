@@ -13,7 +13,10 @@ import (
 	"github.com/cntryl/uno/internal/core/provider"
 )
 
-var secretNamePattern = regexp.MustCompile(`^[0-9A-Za-z-]{1,127}$`)
+var (
+	secretNamePattern = regexp.MustCompile(`^[0-9A-Za-z-]{1,127}$`)
+	vaultNamePattern  = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
+)
 
 type Factory struct{}
 
@@ -67,7 +70,7 @@ func canonicalVaultHost(host string) bool {
 	for _, suffix := range []string{".vault.azure.net", ".vault.usgovcloudapi.net", ".vault.azure.cn", ".vault.microsoftazure.de"} {
 		if strings.HasSuffix(host, suffix) {
 			name := strings.TrimSuffix(host, suffix)
-			return name != "" && len(name) <= 63 && regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`).MatchString(name)
+			return name != "" && len(name) <= 63 && vaultNamePattern.MatchString(name)
 		}
 	}
 	return false

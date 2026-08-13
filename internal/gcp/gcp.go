@@ -3,6 +3,7 @@ package gcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -31,20 +32,26 @@ func secretName(ref provider.Reference) string {
 	return fmt.Sprintf("projects/%s/secrets/%s", ref.Region, ref.Container)
 }
 
-func (s *SecretManager) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]secret.Value, error) {
+func (s *SecretManager) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]provider.ReadResult, error) {
+	if err := provider.ValidateReadGroup(refs); err != nil {
+		return nil, err
+	}
 	if len(refs) == 0 {
 		return nil, nil
 	}
 	out, err := s.C.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{Name: secretName(refs[0]) + "/versions/latest"})
 	if err != nil {
+		if isNotFound(err) {
+			return provider.MissingResults(refs), nil
+		}
 		return nil, remoteError(err)
 	}
 	if out.GetPayload() == nil {
 		return nil, &provider.Error{Kind: provider.InvalidState}
 	}
-	values := make(map[string]secret.Value, len(refs))
-	fail := func(err error) (map[string]secret.Value, error) {
-		secret.DestroyMap(values)
+	values := make(map[string]provider.ReadResult, len(refs))
+	fail := func(err error) (map[string]provider.ReadResult, error) {
+		provider.DestroyReadResults(values)
 		return nil, err
 	}
 	doc := map[string]json.RawMessage{}
@@ -54,7 +61,7 @@ func (s *SecretManager) ReadMany(ctx context.Context, refs []provider.Reference)
 			return fail(&provider.Error{Kind: provider.InvalidBinding})
 		}
 		if ref.Blob() {
-			values[ref.Binding()] = secret.New(string(out.GetPayload().GetData()))
+			values[ref.Binding()] = provider.ReadResult{Value: secret.New(string(out.GetPayload().GetData())), Found: true}
 			continue
 		}
 		if !parsed {
@@ -64,14 +71,18 @@ func (s *SecretManager) ReadMany(ctx context.Context, refs []provider.Reference)
 			parsed = true
 		}
 		raw, ok := doc[ref.Key]
-		if !ok || string(raw) == "null" {
-			return fail(&provider.Error{Kind: provider.InvalidBinding})
+		if !ok {
+			values[ref.Binding()] = provider.ReadResult{}
+			continue
+		}
+		if string(raw) == "null" {
+			return fail(&provider.Error{Kind: provider.InvalidState})
 		}
 		var value string
 		if json.Unmarshal(raw, &value) != nil {
 			return fail(&provider.Error{Kind: provider.InvalidState})
 		}
-		values[ref.Binding()] = secret.New(value)
+		values[ref.Binding()] = provider.ReadResult{Value: secret.New(value), Found: true}
 	}
 	return values, nil
 }
@@ -86,6 +97,9 @@ func (s *SecretManager) ReadMany(ctx context.Context, refs []provider.Reference)
 // can race and the later AddSecretVersion call wins outright, silently
 // dropping the earlier one's sibling keys.
 func (s *SecretManager) WriteMany(ctx context.Context, writes []provider.Write) (provider.Receipt, error) {
+	if err := provider.ValidateWriteGroup(writes); err != nil {
+		return provider.Receipt{}, err
+	}
 	if len(writes) == 0 {
 		return provider.Receipt{}, nil
 	}
@@ -95,16 +109,32 @@ func (s *SecretManager) WriteMany(ctx context.Context, writes []provider.Write) 
 	var existingData []byte
 	switch {
 	case err == nil:
+		if existing == nil || existing.GetPayload() == nil {
+			return provider.Receipt{}, &provider.Error{Kind: provider.InvalidState}
+		}
 		existingData = existing.GetPayload().GetData()
 	case isNotFound(err):
-		if _, createErr := s.C.CreateSecret(ctx, &secretmanagerpb.CreateSecretRequest{
+		created, createErr := s.C.CreateSecret(ctx, &secretmanagerpb.CreateSecretRequest{
 			Parent:   "projects/" + ref.Region,
 			SecretId: ref.Container,
 			Secret: &secretmanagerpb.Secret{
 				Replication: &secretmanagerpb.Replication{Replication: &secretmanagerpb.Replication_Automatic_{Automatic: &secretmanagerpb.Replication_Automatic{}}},
 			},
-		}); createErr != nil && !isAlreadyExists(createErr) {
-			return provider.Receipt{}, remoteError(createErr)
+		})
+		if createErr != nil {
+			if !isAlreadyExists(createErr) {
+				return provider.Receipt{}, remoteError(createErr)
+			}
+			existing, err = s.C.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{Name: name + "/versions/latest"})
+			if err != nil {
+				return provider.Receipt{}, remoteError(err)
+			}
+			if existing == nil || existing.GetPayload() == nil {
+				return provider.Receipt{}, &provider.Error{Kind: provider.InvalidState}
+			}
+			existingData = existing.GetPayload().GetData()
+		} else if created == nil {
+			return provider.Receipt{}, &provider.Error{Kind: provider.InvalidState}
 		}
 	default:
 		return provider.Receipt{}, remoteError(err)
@@ -113,8 +143,12 @@ func (s *SecretManager) WriteMany(ctx context.Context, writes []provider.Write) 
 	if err != nil {
 		return provider.Receipt{}, err
 	}
-	if _, err := s.C.AddSecretVersion(ctx, &secretmanagerpb.AddSecretVersionRequest{Parent: name, Payload: &secretmanagerpb.SecretPayload{Data: payload}}); err != nil {
+	added, err := s.C.AddSecretVersion(ctx, &secretmanagerpb.AddSecretVersionRequest{Parent: name, Payload: &secretmanagerpb.SecretPayload{Data: payload}})
+	if err != nil {
 		return provider.Receipt{}, remoteError(err)
+	}
+	if added == nil {
+		return provider.Receipt{}, &provider.Error{Kind: provider.InvalidState}
 	}
 	return provider.Receipt{Completed: provider.Environments(writes)}, nil
 }
@@ -195,6 +229,9 @@ func isAlreadyExists(err error) bool {
 // handful matter here, so exhaustively listing the rest would only add
 // noise every time the API adds a new code.
 func remoteError(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
 	st, ok := status.FromError(err)
 	if !ok {
 		return &provider.Error{Kind: provider.Indeterminate}
@@ -202,7 +239,10 @@ func remoteError(err error) error {
 	if st.Code() == codes.NotFound {
 		return &provider.Error{Kind: provider.InvalidBinding}
 	}
-	if st.Code() == codes.PermissionDenied || st.Code() == codes.Unauthenticated {
+	if st.Code() == codes.Unauthenticated {
+		return &provider.Error{Kind: provider.Authentication}
+	}
+	if st.Code() == codes.PermissionDenied {
 		return &provider.Error{Kind: provider.AccessDenied}
 	}
 	if st.Code() == codes.FailedPrecondition {

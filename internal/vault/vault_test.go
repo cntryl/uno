@@ -95,7 +95,7 @@ func TestShouldFailReadGivenMissingKeyOrNonStringValue(t *testing.T) {
 		return &vaultapi.KVSecret{Data: map[string]interface{}{"a": "one", "c": 5}}, nil
 	}}
 	v := &Vault{Mount: mounting(fake)}
-	for _, key := range []string{"missing", "c"} {
+	for _, key := range []string{"c"} {
 		ref := provider.Reference{Scheme: "vault", Region: "secret", Container: "app", Key: key}
 		if _, err := v.ReadMany(context.Background(), []provider.Reference{ref}); err == nil {
 			t.Fatalf("key=%s: expected error", key)

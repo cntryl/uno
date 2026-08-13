@@ -48,9 +48,11 @@ type Receipt struct{ Completed []string }
 type Error struct {
 	Message   string
 	Completed []string
+	Cause     error
 }
 
 func (e *Error) Error() string { return e.Message }
+func (e *Error) Unwrap() error { return e.Cause }
 
 func Bind(file *tpl.File, registry *provider.Registry) (*Plan, error) {
 	p := &Plan{Registry: registry}
@@ -83,13 +85,16 @@ func Bind(file *tpl.File, registry *provider.Registry) (*Plan, error) {
 
 // Resolve reads every source before returning any values. It never writes.
 func Resolve(ctx context.Context, p *Plan) (map[string]secret.Value, error) {
+	return resolveWithAdapters(ctx, p, newAdapterCache(p.Registry))
+}
+
+func resolveWithAdapters(ctx context.Context, p *Plan, adapters *adapterCache) (map[string]secret.Value, error) {
 	values := make(map[string]secret.Value, len(p.Mappings))
 	defer func() {
 		if values != nil {
 			secret.DestroyMap(values)
 		}
 	}()
-	adapters := newAdapterCache(p.Registry)
 	groups := groupSources(p.Mappings)
 	type result struct {
 		values map[string]secret.Value
@@ -137,7 +142,7 @@ func resolveGroup(ctx context.Context, adapters *adapterCache, group sourceGroup
 	}
 	got, err := adapter.ReadMany(ctx, refs)
 	if err != nil {
-		secret.DestroyMap(got)
+		provider.DestroyReadResults(got)
 		return nil, safeOperationError("read", err)
 	}
 	valid := len(got) == len(refs)
@@ -152,35 +157,30 @@ func resolveGroup(ctx context.Context, adapters *adapterCache, group sourceGroup
 		}
 	}
 	if !valid {
-		secret.DestroyMap(got)
+		provider.DestroyReadResults(got)
 		return nil, safeOperationError("read", &provider.Error{Kind: provider.InvalidState})
 	}
 	for _, mapping := range group.mappings {
-		values[mapping.Environment] = got[mapping.Source.Binding()].Clone()
+		result := got[mapping.Source.Binding()]
+		if !result.Found {
+			provider.DestroyReadResults(got)
+			return nil, safeOperationError("read", &provider.Error{Kind: provider.InvalidBinding})
+		}
+		values[mapping.Environment] = result.Clone()
 	}
-	secret.DestroyMap(got)
+	provider.DestroyReadResults(got)
 	resultValues := values
 	values = nil
 	return resultValues, nil
 }
 
-func Sync(ctx context.Context, p *Plan) (Receipt, error) {
-	values, err := Resolve(ctx, p)
-	if err != nil {
-		return Receipt{}, err
-	}
-	defer secret.DestroyMap(values)
-	return writeDestinations(ctx, p, values)
-}
-
-func writeDestinations(ctx context.Context, p *Plan, values map[string]secret.Value) (Receipt, error) {
+func writeDestinations(ctx context.Context, p *Plan, values map[string]secret.Value, adapters *adapterCache) (Receipt, error) {
 	groups := groupDestinations(p.Mappings, values)
 	type writeResult struct {
 		receipt provider.Receipt
 		err     error
 	}
 	results := make([]writeResult, len(groups))
-	adapters := newAdapterCache(p.Registry)
 	runLimited(len(groups), func(i int) {
 		group := groups[i]
 		adapter, err := adapters.get(ctx, group.reference)
@@ -200,9 +200,131 @@ func writeDestinations(ctx context.Context, p *Plan, values map[string]secret.Va
 	}
 	sort.Strings(completed)
 	if firstErr != nil {
-		return Receipt{}, &Error{Message: safeKind("write", firstErr), Completed: completed}
+		return Receipt{}, &Error{Message: safeKind("write", firstErr), Completed: completed, Cause: contextCause(firstErr)}
 	}
 	return Receipt{Completed: completed}, nil
+}
+
+type SyncOptions struct {
+	DryRun  bool
+	Confirm func([]Change) (bool, error)
+}
+
+type SyncResult struct {
+	DryRun    bool     `json:"dryRun"`
+	Changes   []Change `json:"changes"`
+	Completed []string `json:"completed"`
+}
+
+// Sync resolves all sources, inspects every destination container once, and
+// writes only changed mappings. No confirmation or write occurs unless every
+// source and destination snapshot was read successfully.
+func Sync(ctx context.Context, p *Plan, options SyncOptions) (SyncResult, error) {
+	result := SyncResult{DryRun: options.DryRun, Changes: []Change{}, Completed: []string{}}
+	adapters := newAdapterCache(p.Registry)
+	values, err := resolveWithAdapters(ctx, p, adapters)
+	if err != nil {
+		return result, err
+	}
+	defer secret.DestroyMap(values)
+
+	changes, err := inspectDestinations(ctx, p, values, adapters)
+	result.Changes = changes
+	if err != nil {
+		return result, err
+	}
+	pending := make(map[string]bool)
+	var actionable []Change
+	for _, change := range changes {
+		if change.Kind != Unchanged {
+			pending[change.Environment] = true
+			actionable = append(actionable, change)
+		}
+	}
+	if options.DryRun || len(actionable) == 0 {
+		return result, nil
+	}
+	if options.Confirm != nil {
+		ok, confirmErr := options.Confirm(actionable)
+		if confirmErr != nil {
+			return result, confirmErr
+		}
+		if !ok {
+			return result, &Error{Message: "sync aborted: not confirmed"}
+		}
+	}
+	filtered := &Plan{Registry: p.Registry}
+	for _, mapping := range p.Mappings {
+		if pending[mapping.Environment] {
+			filtered.Mappings = append(filtered.Mappings, mapping)
+		}
+	}
+	receipt, err := writeDestinations(ctx, filtered, values, adapters)
+	result.Completed = receiptCompleted(receipt, err)
+	return result, err
+}
+
+func receiptCompleted(receipt Receipt, err error) []string {
+	if workflow := (*Error)(nil); errors.As(err, &workflow) {
+		return workflow.Completed
+	}
+	return receipt.Completed
+}
+
+func inspectDestinations(ctx context.Context, p *Plan, desired map[string]secret.Value, adapters *adapterCache) ([]Change, error) {
+	groups := groupDestinationContainers(p.Mappings)
+	type groupResult struct {
+		changes []Change
+		err     error
+	}
+	results := make([]groupResult, len(groups))
+	runLimited(len(groups), func(i int) {
+		group := groups[i]
+		adapter, err := adapters.get(ctx, group.reference)
+		if err != nil {
+			results[i].err = safeOperationError("inspect", err)
+			return
+		}
+		refs := make([]provider.Reference, 0, len(group.mappings))
+		for _, mapping := range group.mappings {
+			refs = append(refs, mapping.Destination)
+		}
+		got, err := adapter.ReadMany(ctx, refs)
+		if err != nil {
+			provider.DestroyReadResults(got)
+			results[i].err = safeOperationError("inspect", err)
+			return
+		}
+		defer provider.DestroyReadResults(got)
+		if len(got) != len(refs) {
+			results[i].err = safeOperationError("inspect", &provider.Error{Kind: provider.InvalidState})
+			return
+		}
+		for _, mapping := range group.mappings {
+			current, ok := got[mapping.Destination.Binding()]
+			if !ok {
+				results[i].err = safeOperationError("inspect", &provider.Error{Kind: provider.InvalidState})
+				return
+			}
+			kind := Create
+			if current.Found {
+				kind = Update
+				if current.Value.Reveal() == desired[mapping.Environment].Reveal() {
+					kind = Unchanged
+				}
+			}
+			results[i].changes = append(results[i].changes, Change{Environment: mapping.Environment, Kind: kind})
+		}
+	})
+	changes := make([]Change, 0, len(p.Mappings))
+	for _, result := range results {
+		if result.err != nil {
+			return changes, result.err
+		}
+		changes = append(changes, result.changes...)
+	}
+	sort.Slice(changes, func(i, j int) bool { return changes[i].Environment < changes[j].Environment })
+	return changes, nil
 }
 
 // ChangeKind classifies how a mapping's destination compares to its
@@ -223,103 +345,6 @@ const (
 type Change struct {
 	Environment string     `json:"environment"`
 	Kind        ChangeKind `json:"kind"`
-}
-
-// Diff resolves every source, then compares each destination's current
-// value (if readable) against the resolved value, without writing anything.
-func Diff(ctx context.Context, p *Plan) ([]Change, error) {
-	values, err := Resolve(ctx, p)
-	if err != nil {
-		return nil, err
-	}
-	defer secret.DestroyMap(values)
-	return diffValues(ctx, p, values), nil
-}
-
-func diffValues(ctx context.Context, p *Plan, values map[string]secret.Value) []Change {
-	adapters := newAdapterCache(p.Registry)
-	changes := make([]Change, len(p.Mappings))
-	runLimited(len(p.Mappings), func(i int) {
-		mapping := p.Mappings[i]
-		changes[i] = Change{Environment: mapping.Environment, Kind: diffOne(ctx, adapters, mapping, values[mapping.Environment])}
-	})
-	sort.Slice(changes, func(i, j int) bool { return changes[i].Environment < changes[j].Environment })
-	return changes
-}
-
-// diffOne reads the destination's current value and compares it against
-// desired. A destination that can't be read back because the binding (or
-// its container) doesn't exist yet is Create; a destination whose adapter
-// can't even be built, or whose read fails for an unrecognized reason, is
-// conservatively treated as Update — the safer default is "assume a pending
-// change" rather than silently classifying an unknown state as Unchanged.
-func diffOne(ctx context.Context, adapters *adapterCache, mapping Mapping, desired secret.Value) ChangeKind {
-	adapter, err := adapters.get(ctx, mapping.Destination)
-	if err != nil {
-		return Update
-	}
-	current, err := adapter.ReadMany(ctx, []provider.Reference{mapping.Destination})
-	if err != nil {
-		secret.DestroyMap(current)
-		var typed *provider.Error
-		if errors.As(err, &typed) && typed.Kind == provider.InvalidBinding {
-			return Create
-		}
-		return Update
-	}
-	existing, ok := current[mapping.Destination.Binding()]
-	same := ok && existing.Reveal() == desired.Reveal()
-	secret.DestroyMap(current)
-	if same {
-		return Unchanged
-	}
-	return Update
-}
-
-// SyncChanged resolves every source, diffs against current destination
-// values, and writes only the mappings that would actually create or update
-// a value — mappings whose destination already matches are skipped, so a
-// sync with nothing pending never calls a provider's write API and never
-// bumps a secret's version history for no reason.
-//
-// confirm, if non-nil, is invoked with the pending (non-Unchanged) changes
-// before any write happens; returning false, or a non-nil error, aborts
-// without writing. confirm is never called when nothing is pending.
-func SyncChanged(ctx context.Context, p *Plan, confirm func([]Change) (bool, error)) ([]Change, Receipt, error) {
-	values, err := Resolve(ctx, p)
-	if err != nil {
-		return nil, Receipt{}, err
-	}
-	defer secret.DestroyMap(values)
-	changes := diffValues(ctx, p, values)
-	pending := make([]Change, 0, len(changes))
-	pendingEnvironments := map[string]bool{}
-	for _, c := range changes {
-		if c.Kind != Unchanged {
-			pending = append(pending, c)
-			pendingEnvironments[c.Environment] = true
-		}
-	}
-	if len(pending) == 0 {
-		return changes, Receipt{}, nil
-	}
-	if confirm != nil {
-		ok, err := confirm(pending)
-		if err != nil {
-			return changes, Receipt{}, err
-		}
-		if !ok {
-			return changes, Receipt{}, &Error{Message: "sync aborted: not confirmed"}
-		}
-	}
-	filtered := &Plan{Registry: p.Registry}
-	for _, m := range p.Mappings {
-		if pendingEnvironments[m.Environment] {
-			filtered.Mappings = append(filtered.Mappings, m)
-		}
-	}
-	receipt, err := writeDestinations(ctx, filtered, values)
-	return changes, receipt, err
 }
 
 // RollbackStatus classifies the outcome of reverting one mapping's
@@ -397,6 +422,9 @@ func rollbackStatusForAll(environments []string, status RollbackStatus, detail s
 }
 
 func safeOperationError(op string, err error) error {
+	if cause := contextCause(err); cause != nil {
+		return cause
+	}
 	return fmt.Errorf("%s failed: %s", op, kind(err))
 }
 func safeKind(op string, err error) string { return fmt.Sprintf("%s failed: %s", op, kind(err)) }
@@ -406,4 +434,14 @@ func kind(err error) provider.ErrorKind {
 		return typed.Kind
 	}
 	return provider.Other
+}
+
+func contextCause(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }

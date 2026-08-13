@@ -7,6 +7,7 @@ import (
 
 	op "github.com/1password/onepassword-sdk-go"
 	"github.com/cntryl/uno/internal/core/provider"
+	"github.com/cntryl/uno/internal/version"
 )
 
 type Factory struct{}
@@ -47,7 +48,7 @@ func New(ctx context.Context) (*Adapter, error) {
 	if err != nil {
 		return nil, err
 	}
-	options = append(options, op.WithIntegrationInfo("uno", "0.1.1"))
+	options = append(options, op.WithIntegrationInfo("uno", version.Current))
 	client, err := op.NewClient(ctx, options...)
 	if err != nil {
 		return nil, &provider.Error{Kind: provider.Authentication}

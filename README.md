@@ -26,8 +26,8 @@ Follow this sequence unless the user explicitly requests something else:
 
 3. Set every placeholder used by the template, then validate locally. Use
    `check` for a concise validity summary, or `sync --dry-run` for a
-   per-mapping preview of the sync plan. Neither command contacts providers or
-   writes anything:
+   per-mapping preview of the sync plan. `check` is offline; dry-run resolves
+   sources and reads destinations but never confirms or writes:
 
    ```sh
    export OP_VAULT=my-vault
@@ -55,7 +55,10 @@ a _pending change_. Writing a pending change requires either an interactive
 confirmation or `--force` — **in a non-interactive/agent/CI context, pass
 `--force` explicitly**, or `sync` refuses with an error rather than hanging
 on a prompt. Add `--json` for machine-readable output
-(`{"changes": [...], "completed": [...], "unchanged": N}`).
+(`{"dryRun": false, "changes": [...], "completed": [...]}`). A failed
+operation may add a sanitized `error` string. Dry-run uses the same shape with
+`dryRun: true` and therefore requires read credentials for every source and
+destination.
 
 ```sh
 npx uno sync --force        # non-interactive: write every pending change
@@ -77,8 +80,13 @@ reported per mapping rather than assumed:
   mutable metadata into a new version. This is best-effort because Key Vault
   has no movable "current" pointer. Rollback requires `get`, `set`, and
   `list` secret permissions.
+- **GCP Secret Manager**: reads the numeric version before latest and appends
+  its payload as a new version. This is best-effort.
+- **HashiCorp Vault KV v2**: uses the engine's native rollback operation.
 - **1Password**: not supported yet. Mappings targeting it are reported
   `unsupported`, not silently skipped.
+
+Rollback exits unsuccessfully if any mapping is `failed` or `unsupported`.
 
 Like `sync`, `rollback` requires `--force` in a non-interactive context and
 supports `--json`:
@@ -134,6 +142,9 @@ dotenv file. It never writes destination providers.
 process, preserves argv and exit status, and does not create a secrets file.
 The `--` separator is required so flags intended for the child can never be
 interpreted as `uno` flags.
+Usage errors exit 2, provider or incomplete-operation failures exit 1, and
+successful commands exit 0. `run` preserves the child process exit or signal
+code.
 The child can read every injected value, and same-user processes may also be
 able to inspect its environment through facilities such as
 `/proc/<pid>/environ` or `ps e`, depending on the platform and its security

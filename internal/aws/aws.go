@@ -12,6 +12,7 @@ import (
 	sm "github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	smtypes "github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
+	"github.com/aws/smithy-go"
 	"github.com/cntryl/uno/internal/core/provider"
 	"github.com/cntryl/uno/internal/core/secret"
 )
@@ -30,20 +31,26 @@ type Secrets struct {
 
 const maxWriteAttempts = 4
 
-func (s *Secrets) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]secret.Value, error) {
+func (s *Secrets) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]provider.ReadResult, error) {
+	if err := provider.ValidateReadGroup(refs); err != nil {
+		return nil, err
+	}
 	if len(refs) == 0 {
 		return nil, nil
 	}
 	out, err := s.C.GetSecretValue(ctx, &sm.GetSecretValueInput{SecretId: &refs[0].Container})
 	if err != nil {
+		if isMissing(err) {
+			return missing(refs), nil
+		}
 		return nil, remoteError(err)
 	}
 	if out.SecretString == nil {
 		return nil, &provider.Error{Kind: provider.InvalidState}
 	}
-	values := make(map[string]secret.Value, len(refs))
-	fail := func(err error) (map[string]secret.Value, error) {
-		secret.DestroyMap(values)
+	values := make(map[string]provider.ReadResult, len(refs))
+	fail := func(err error) (map[string]provider.ReadResult, error) {
+		provider.DestroyReadResults(values)
 		return nil, err
 	}
 	doc := map[string]json.RawMessage{}
@@ -53,7 +60,7 @@ func (s *Secrets) ReadMany(ctx context.Context, refs []provider.Reference) (map[
 			return fail(&provider.Error{Kind: provider.InvalidBinding})
 		}
 		if ref.Blob() {
-			values[ref.Binding()] = secret.New(*out.SecretString)
+			values[ref.Binding()] = provider.ReadResult{Value: secret.New(*out.SecretString), Found: true}
 			continue
 		}
 		if !parsed {
@@ -63,18 +70,33 @@ func (s *Secrets) ReadMany(ctx context.Context, refs []provider.Reference) (map[
 			parsed = true
 		}
 		raw, ok := doc[ref.Key]
-		if !ok || string(raw) == "null" {
-			return fail(&provider.Error{Kind: provider.InvalidBinding})
+		if !ok {
+			values[ref.Binding()] = provider.ReadResult{}
+			continue
+		}
+		if string(raw) == "null" {
+			return fail(&provider.Error{Kind: provider.InvalidState})
 		}
 		var value string
 		if json.Unmarshal(raw, &value) != nil {
 			return fail(&provider.Error{Kind: provider.InvalidState})
 		}
-		values[ref.Binding()] = secret.New(value)
+		values[ref.Binding()] = provider.ReadResult{Value: secret.New(value), Found: true}
 	}
 	return values, nil
 }
+
+func missing(refs []provider.Reference) map[string]provider.ReadResult {
+	values := make(map[string]provider.ReadResult, len(refs))
+	for _, ref := range refs {
+		values[ref.Binding()] = provider.ReadResult{}
+	}
+	return values
+}
 func (s *Secrets) WriteMany(ctx context.Context, writes []provider.Write) (provider.Receipt, error) {
+	if err := provider.ValidateWriteGroup(writes); err != nil {
+		return provider.Receipt{}, err
+	}
 	if len(writes) == 0 {
 		return provider.Receipt{}, nil
 	}
@@ -266,10 +288,24 @@ func isMissing(err error) bool {
 	return errors.As(err, &missing)
 }
 func remoteError(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
 	var missingSM *smtypes.ResourceNotFoundException
 	var missingSSM *ssmtypes.ParameterNotFound
 	if errors.As(err, &missingSM) || errors.As(err, &missingSSM) {
 		return &provider.Error{Kind: provider.InvalidBinding}
+	}
+	var api smithy.APIError
+	if errors.As(err, &api) {
+		switch api.ErrorCode() {
+		case "UnrecognizedClientException", "InvalidSignatureException", "ExpiredTokenException", "InvalidClientTokenId":
+			return &provider.Error{Kind: provider.Authentication}
+		case "AccessDenied", "AccessDeniedException", "UnauthorizedOperation":
+			return &provider.Error{Kind: provider.AccessDenied}
+		case "InvalidParameterException", "InvalidRequestException", "ParameterAlreadyExists":
+			return &provider.Error{Kind: provider.InvalidState}
+		}
 	}
 	return &provider.Error{Kind: provider.Indeterminate}
 }

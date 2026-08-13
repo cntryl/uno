@@ -25,15 +25,23 @@ type SSM struct {
 	jitter func(time.Duration) time.Duration
 }
 
-func (s *SSM) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]secret.Value, error) {
-	values := make(map[string]secret.Value, len(refs))
+func (s *SSM) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]provider.ReadResult, error) {
+	// SSM is intentionally one exact parameter per group.
+	if len(refs) > 1 {
+		return nil, &provider.Error{Kind: provider.InvalidBinding}
+	}
+	values := make(map[string]provider.ReadResult, len(refs))
 	for _, ref := range refs {
 		value, err := s.read(ctx, ref)
 		if err != nil {
-			secret.DestroyMap(values)
+			if isMissing(err) {
+				values[ref.Binding()] = provider.ReadResult{}
+				continue
+			}
+			provider.DestroyReadResults(values)
 			return nil, err
 		}
-		values[ref.Binding()] = value
+		values[ref.Binding()] = provider.ReadResult{Value: value, Found: true}
 	}
 	return values, nil
 }

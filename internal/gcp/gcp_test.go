@@ -101,10 +101,9 @@ func TestShouldFailReadGivenSecretNotFound(t *testing.T) {
 	}}
 	s := &SecretManager{C: fake}
 	ref := provider.Reference{Region: "p", Container: "s", Key: "a"}
-	_, err := s.ReadMany(context.Background(), []provider.Reference{ref})
-	var typed *provider.Error
-	if !errors.As(err, &typed) || typed.Kind != provider.InvalidBinding {
-		t.Fatalf("err=%v", err)
+	values, err := s.ReadMany(context.Background(), []provider.Reference{ref})
+	if err != nil || values[ref.Binding()].Found {
+		t.Fatalf("values=%v err=%v", values, err)
 	}
 }
 
@@ -149,6 +148,54 @@ func TestShouldCreateSecretGivenNotFoundThenAddVersion(t *testing.T) {
 	receipt, err := s.WriteMany(context.Background(), writes)
 	if err != nil || len(receipt.Completed) != 1 || !created {
 		t.Fatalf("receipt=%v created=%v err=%v", receipt, created, err)
+	}
+}
+
+func TestShouldRereadAndPreserveSiblingsGivenCreateRace(t *testing.T) {
+	reads := 0
+	var added []byte
+	fake := &fakeSecretManagerAPI{
+		access: func(context.Context, *secretmanagerpb.AccessSecretVersionRequest) (*secretmanagerpb.AccessSecretVersionResponse, error) {
+			reads++
+			if reads == 1 {
+				return nil, notFound()
+			}
+			return &secretmanagerpb.AccessSecretVersionResponse{Payload: &secretmanagerpb.SecretPayload{Data: []byte(`{"sibling":"preserved"}`)}}, nil
+		},
+		create: func(context.Context, *secretmanagerpb.CreateSecretRequest) (*secretmanagerpb.Secret, error) {
+			return nil, status.Error(codes.AlreadyExists, "raced")
+		},
+		add: func(_ context.Context, req *secretmanagerpb.AddSecretVersionRequest) (*secretmanagerpb.SecretVersion, error) {
+			added = req.GetPayload().GetData()
+			return &secretmanagerpb.SecretVersion{}, nil
+		},
+	}
+	writes := []provider.Write{{Environment: "A", Reference: provider.Reference{Region: "p", Container: "s", Key: "new"}, Value: secret.New("value")}}
+	if _, err := (&SecretManager{C: fake}).WriteMany(context.Background(), writes); err != nil || reads != 2 || string(added) != `{"new":"value","sibling":"preserved"}` {
+		t.Fatalf("reads=%d added=%s err=%v", reads, added, err)
+	}
+}
+
+func TestShouldRejectNilSDKResponses(t *testing.T) {
+	readFake := &fakeSecretManagerAPI{
+		access: func(context.Context, *secretmanagerpb.AccessSecretVersionRequest) (*secretmanagerpb.AccessSecretVersionResponse, error) {
+			return nil, nil
+		},
+	}
+	writeFake := &fakeSecretManagerAPI{
+		access: func(context.Context, *secretmanagerpb.AccessSecretVersionRequest) (*secretmanagerpb.AccessSecretVersionResponse, error) {
+			return &secretmanagerpb.AccessSecretVersionResponse{Payload: &secretmanagerpb.SecretPayload{Data: []byte("old")}}, nil
+		},
+		add: func(context.Context, *secretmanagerpb.AddSecretVersionRequest) (*secretmanagerpb.SecretVersion, error) {
+			return nil, nil
+		},
+	}
+	ref := provider.Reference{Region: "p", Container: "s"}
+	if _, err := (&SecretManager{C: readFake}).ReadMany(context.Background(), []provider.Reference{ref}); err == nil {
+		t.Fatal("expected nil read response to fail")
+	}
+	if _, err := (&SecretManager{C: writeFake}).WriteMany(context.Background(), []provider.Write{{Environment: "A", Reference: ref, Value: secret.New("value")}}); err == nil {
+		t.Fatal("expected nil write response to fail")
 	}
 }
 

@@ -45,14 +45,14 @@ func TestReadManyUsesOneSnapshotForBlobAndKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer secret.DestroyMap(values)
+	defer provider.DestroyReadResults(values)
 	if calls != 1 || values[refs[0].Binding()].Reveal() != "one" || values[refs[1].Binding()].Reveal() != "two" {
 		t.Fatalf("calls=%d values=%v", calls, values)
 	}
 }
 
 func TestReadManyRejectsUnsafeValuesAndMixedContainers(t *testing.T) {
-	for _, value := range []*string{nil, ptr("null"), ptr(`{"a":null}`), ptr(`{"a":1}`), ptr(`{"b":"x"}`)} {
+	for _, value := range []*string{nil, ptr("null"), ptr(`{"a":null}`), ptr(`{"a":1}`)} {
 		f := &fakeClient{get: func(context.Context, string, string) (azsecrets.GetSecretResponse, error) {
 			return azsecrets.GetSecretResponse{Secret: azsecrets.Secret{Value: value}}, nil
 		}}

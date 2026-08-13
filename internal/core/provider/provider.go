@@ -67,8 +67,33 @@ type Write struct {
 }
 type Receipt struct{ Completed []string }
 
+// ReadResult distinguishes an absent binding from a present empty value.
+// Adapters must return one result for every requested binding.
+type ReadResult struct {
+	Value secret.Value
+	Found bool
+}
+
+func (r ReadResult) Reveal() string      { return r.Value.Reveal() }
+func (r ReadResult) Clone() secret.Value { return r.Value.Clone() }
+
+func MissingResults(refs []Reference) map[string]ReadResult {
+	results := make(map[string]ReadResult, len(refs))
+	for _, ref := range refs {
+		results[ref.Binding()] = ReadResult{}
+	}
+	return results
+}
+
+func DestroyReadResults(results map[string]ReadResult) {
+	for key, result := range results {
+		result.Value.Destroy()
+		delete(results, key)
+	}
+}
+
 type Reader interface {
-	ReadMany(context.Context, []Reference) (map[string]secret.Value, error)
+	ReadMany(context.Context, []Reference) (map[string]ReadResult, error)
 }
 type Writer interface {
 	WriteMany(context.Context, []Write) (Receipt, error)
@@ -181,4 +206,31 @@ func Environments(writes []Write) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+func ValidateWriteGroup(writes []Write) error {
+	if len(writes) == 0 {
+		return nil
+	}
+	first := writes[0].Reference
+	for _, write := range writes {
+		ref := write.Reference
+		if ref.Scheme != first.Scheme || ref.Region != first.Region || ref.Container != first.Container || ref.Blob() != first.Blob() {
+			return &Error{Kind: InvalidBinding}
+		}
+	}
+	return nil
+}
+
+func ValidateReadGroup(refs []Reference) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	first := refs[0]
+	for _, ref := range refs {
+		if ref.Scheme != first.Scheme || ref.Region != first.Region || ref.Container != first.Container {
+			return &Error{Kind: InvalidBinding}
+		}
+	}
+	return nil
 }

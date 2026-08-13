@@ -3,6 +3,7 @@ package onepassword
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -56,7 +57,7 @@ func (a *Adapter) waitBeforeRetry(ctx context.Context, attempt int) error {
 func (a *Adapter) resolveVault(ctx context.Context, name string) (string, error) {
 	vaults, err := a.listVaults(ctx)
 	if err != nil {
-		return "", remote()
+		return "", remote(err)
 	}
 	ids := []string{}
 	for _, vault := range vaults {
@@ -109,7 +110,7 @@ func (a *Adapter) load(ctx context.Context, ref provider.Reference) (*op.Item, e
 	}
 	items, err := a.listItems(ctx, vault)
 	if err != nil {
-		return nil, remote()
+		return nil, remote(err)
 	}
 	ids := []string{}
 	for _, item := range items {
@@ -125,11 +126,14 @@ func (a *Adapter) load(ctx context.Context, ref provider.Reference) (*op.Item, e
 	}
 	item, err := a.lookup.GetItem(ctx, vault, ids[0])
 	if err != nil {
-		return nil, remote()
+		return nil, remote(err)
 	}
 	return &item, nil
 }
-func (a *Adapter) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]secret.Value, error) {
+func (a *Adapter) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]provider.ReadResult, error) {
+	if err := provider.ValidateReadGroup(refs); err != nil {
+		return nil, err
+	}
 	if len(refs) == 0 {
 		return nil, nil
 	}
@@ -138,14 +142,14 @@ func (a *Adapter) ReadMany(ctx context.Context, refs []provider.Reference) (map[
 		return nil, err
 	}
 	if item == nil {
-		return nil, &provider.Error{Kind: provider.InvalidBinding}
+		return provider.MissingResults(refs), nil
 	}
 	if item.Category != op.ItemCategorySecureNote {
 		return nil, &provider.Error{Kind: provider.InvalidState}
 	}
-	values := make(map[string]secret.Value, len(refs))
-	fail := func(err error) (map[string]secret.Value, error) {
-		secret.DestroyMap(values)
+	values := make(map[string]provider.ReadResult, len(refs))
+	fail := func(err error) (map[string]provider.ReadResult, error) {
+		provider.DestroyReadResults(values)
 		return nil, err
 	}
 	for _, ref := range refs {
@@ -153,7 +157,7 @@ func (a *Adapter) ReadMany(ctx context.Context, refs []provider.Reference) (map[
 			return fail(&provider.Error{Kind: provider.InvalidBinding})
 		}
 		if ref.Blob() {
-			values[ref.Binding()] = secret.New(item.Notes)
+			values[ref.Binding()] = provider.ReadResult{Value: secret.New(item.Notes), Found: true}
 			continue
 		}
 		section, field := splitKey(ref.Key)
@@ -168,12 +172,13 @@ func (a *Adapter) ReadMany(ctx context.Context, refs []provider.Reference) (map[
 			}
 		}
 		if len(matches) == 0 {
-			return fail(&provider.Error{Kind: provider.InvalidBinding})
+			values[ref.Binding()] = provider.ReadResult{}
+			continue
 		}
 		if len(matches) > 1 {
 			return fail(&provider.Error{Kind: provider.Ambiguous})
 		}
-		values[ref.Binding()] = secret.New(matches[0].Value)
+		values[ref.Binding()] = provider.ReadResult{Value: secret.New(matches[0].Value), Found: true}
 	}
 	return values, nil
 }
@@ -208,4 +213,9 @@ func sameSection(a, b *string) bool {
 	}
 	return *a == *b
 }
-func remote() error { return &provider.Error{Kind: provider.Indeterminate} }
+func remote(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return &provider.Error{Kind: provider.Indeterminate}
+}
