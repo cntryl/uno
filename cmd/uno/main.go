@@ -55,11 +55,11 @@ func executeWithRegistry(ctx context.Context, args []string, providers *provider
 	global.BoolVar(&help, "help", false, "show help")
 	global.BoolVar(&help, "h", false, "show help")
 	global.BoolVar(&showVersion, "version", false, "show version")
-	invocation, err := parseInvocation(args)
+	invocation, err := parseInvocation(args, global)
 	if err != nil {
 		return 0, err
 	}
-	if invocation.command == "" {
+	if !invocation.commandFound {
 		if err := global.Parse(invocation.globals); err != nil {
 			return 0, cleanFlagError(err)
 		}
@@ -231,27 +231,28 @@ func (a *app) load() (*engine.Plan, error) {
 
 type invocation struct {
 	command         string
+	commandFound    bool
 	globals         []string
 	commandArgs     []string
 	runHasSeparator bool
 }
 
-func parseInvocation(args []string) (invocation, error) {
+func parseInvocation(args []string, flags *flag.FlagSet) (invocation, error) {
 	var parsed invocation
 	globalOptionsEnded := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		if parsed.command == "" {
+		if !parsed.commandFound {
 			if !globalOptionsEnded && arg == "--" {
 				globalOptionsEnded = true
 				continue
 			}
 			if !globalOptionsEnded {
-				if values, ok := globalFlagValues(arg); ok {
+				if values, ok := globalFlagValues(flags, arg); ok {
 					parsed.globals = append(parsed.globals, arg)
 					if values == 1 {
 						if i+1 >= len(args) {
-							return invocation{}, fmt.Errorf("invalid arguments: flag needs an argument: %s", arg)
+							return invocation{}, parseFlagError(flags, arg)
 						}
 						i++
 						parsed.globals = append(parsed.globals, args[i])
@@ -259,10 +260,11 @@ func parseInvocation(args []string) (invocation, error) {
 					continue
 				}
 				if strings.HasPrefix(arg, "-") {
-					return invocation{}, fmt.Errorf("invalid arguments: flag provided but not defined: -%s", strings.TrimLeft(arg, "-"))
+					return invocation{}, parseFlagError(flags, arg)
 				}
 			}
 			parsed.command = arg
+			parsed.commandFound = true
 			continue
 		}
 
@@ -271,11 +273,11 @@ func parseInvocation(args []string) (invocation, error) {
 			parsed.runHasSeparator = parsed.command == "run"
 			return parsed, nil
 		}
-		if values, ok := globalFlagValues(arg); ok {
+		if values, ok := globalFlagValues(flags, arg); ok {
 			parsed.globals = append(parsed.globals, arg)
 			if values == 1 {
 				if i+1 >= len(args) {
-					return invocation{}, fmt.Errorf("invalid arguments: flag needs an argument: %s", arg)
+					return invocation{}, parseFlagError(flags, arg)
 				}
 				i++
 				parsed.globals = append(parsed.globals, args[i])
@@ -287,15 +289,31 @@ func parseInvocation(args []string) (invocation, error) {
 	return parsed, nil
 }
 
-func globalFlagValues(arg string) (int, bool) {
-	switch {
-	case arg == "--template" || arg == "--timeout":
-		return 1, true
-	case arg == "--help" || arg == "-h" || arg == "--version" || strings.HasPrefix(arg, "--template=") || strings.HasPrefix(arg, "--timeout="):
-		return 0, true
-	default:
+func globalFlagValues(flags *flag.FlagSet, arg string) (int, bool) {
+	if len(arg) < 2 || arg[0] != '-' || arg == "--" {
 		return 0, false
 	}
+	name := strings.TrimPrefix(arg, "-")
+	name = strings.TrimPrefix(name, "-")
+	name, _, hasValue := strings.Cut(name, "=")
+	registered := flags.Lookup(name)
+	if registered == nil {
+		return 0, false
+	}
+	if hasValue {
+		return 0, true
+	}
+	if boolean, ok := registered.Value.(interface{ IsBoolFlag() bool }); ok && boolean.IsBoolFlag() {
+		return 0, true
+	}
+	return 1, true
+}
+
+func parseFlagError(flags *flag.FlagSet, arg string) error {
+	if err := flags.Parse([]string{arg}); err != nil {
+		return cleanFlagError(err)
+	}
+	return fmt.Errorf("invalid arguments: invalid flag %s", arg)
 }
 func cleanFlagError(err error) error { return fmt.Errorf("invalid arguments: %w", err) }
 func printReceipt(receipt engine.Receipt, err error) {

@@ -290,6 +290,48 @@ func TestDoubleDashMayPrecedeCommand(t *testing.T) {
 	}
 }
 
+func TestEmptyArgumentRemainsTheCommand(t *testing.T) {
+	path := templateFile(t)
+	_, err := executeWithRegistry(context.Background(), []string{"--template", path, "", "sync", "--dry-run"}, cliRegistry(&cliAdapter{}))
+	if err == nil || err.Error() != `unknown command ""` {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestSingleDashLongGlobalFlags(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"-version"}, "uno " + version + "\n"},
+		{[]string{"-help"}, "Usage: uno"},
+	} {
+		output := captureStdout(t, func() {
+			if _, err := executeWithRegistry(context.Background(), tc.args, cliRegistry(&cliAdapter{})); err != nil {
+				t.Fatalf("args=%v err=%v", tc.args, err)
+			}
+		})
+		if !strings.Contains(output, tc.want) {
+			t.Fatalf("args=%v output=%q", tc.args, output)
+		}
+	}
+}
+
+func TestGlobalFlagErrorsUseGoFlagFormatting(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--foo=bar", "check"}, "invalid arguments: flag provided but not defined: -foo"},
+		{[]string{"--template"}, "invalid arguments: flag needs an argument: -template"},
+	} {
+		_, err := executeWithRegistry(context.Background(), tc.args, cliRegistry(&cliAdapter{}))
+		if err == nil || err.Error() != tc.want {
+			t.Fatalf("args=%v err=%v want=%q", tc.args, err, tc.want)
+		}
+	}
+}
+
 func captureStdout(t *testing.T, action func()) string {
 	t.Helper()
 	old := os.Stdout
