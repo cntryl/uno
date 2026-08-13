@@ -20,16 +20,19 @@ func (Factory) Adapter(ctx context.Context, _ provider.Reference) (provider.Adap
 }
 
 func Parse(raw string) (provider.Reference, error) {
-	if !strings.HasPrefix(raw, "op://") || strings.ContainsRune(raw, 0) {
-		return invalidReference()
+	if strings.ContainsRune(raw, 0) {
+		return invalidReference("reference contains NUL")
+	}
+	if !strings.HasPrefix(raw, "op://") {
+		return invalidReference("1Password reference must start with op://")
 	}
 	parts := strings.Split(strings.TrimPrefix(raw, "op://"), "/")
 	if len(parts) < 2 {
-		return invalidReference()
+		return invalidReference("1Password reference requires vault/item[/field]")
 	}
 	for _, part := range parts {
 		if part == "" {
-			return invalidReference()
+			return invalidReference("1Password vault, item, and field segments must not be empty")
 		}
 	}
 	key := ""
@@ -63,6 +66,6 @@ func clientOptions(token, account string) ([]op.ClientOption, error) {
 	return nil, &provider.Error{Kind: provider.Authentication}
 }
 
-func invalidReference() (provider.Reference, error) {
-	return provider.Reference{}, &provider.Error{Kind: provider.InvalidBinding}
+func invalidReference(detail string) (provider.Reference, error) {
+	return provider.Reference{}, provider.InvalidReference(detail)
 }

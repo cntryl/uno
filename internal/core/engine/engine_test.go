@@ -151,3 +151,24 @@ func TestBindRejectsDuplicateAndBlobKeyMix(t *testing.T) {
 		}
 	}
 }
+
+func TestBindReportsActionableReferenceAndDestinationErrors(t *testing.T) {
+	adapter := &fakeAdapter{}
+	registry := provider.NewRegistry()
+	registry.Register("fake", fakeFactory{adapter})
+
+	file, _ := tpl.ParseEnv("A=unknown://source/a -> fake://d/a\n", func(string) (string, bool) { return "", false })
+	if _, err := Bind(file, registry); err == nil || err.Error() != "line 1: invalid source reference: unknown provider scheme" {
+		t.Fatalf("source err=%v", err)
+	}
+
+	file, _ = tpl.ParseEnv("A=fake://s/a -> fake://d/x\nB=fake://s/b -> fake://d/x\n", func(string) (string, bool) { return "", false })
+	if _, err := Bind(file, registry); err == nil || err.Error() != "line 2: destination duplicates line 1 (A)" {
+		t.Fatalf("duplicate err=%v", err)
+	}
+
+	file, _ = tpl.ParseEnv("A=fake://s/a -> fake://d\nB=fake://s/b -> fake://d/x\n", func(string) (string, bool) { return "", false })
+	if _, err := Bind(file, registry); err == nil || err.Error() != "line 2: destination mixes blob and keyed writes with line 1 (A)" {
+		t.Fatalf("mixed err=%v", err)
+	}
+}

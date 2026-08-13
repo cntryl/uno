@@ -33,7 +33,7 @@ var completeSecretARN = regexp.MustCompile(`^(arn:[^:]+:secretsmanager:([^:]+):[
 
 func Parse(raw string) (provider.Reference, error) {
 	if strings.ContainsRune(raw, 0) {
-		return invalidReference()
+		return invalidReference("reference contains NUL")
 	}
 	switch {
 	case strings.HasPrefix(raw, "aws-secrets-manager://"):
@@ -43,24 +43,24 @@ func Parse(raw string) (provider.Reference, error) {
 	case strings.HasPrefix(raw, "aws-ssm://"):
 		return parseParameter(strings.TrimPrefix(raw, "aws-ssm://"))
 	default:
-		return invalidReference()
+		return invalidReference("unknown AWS reference scheme")
 	}
 }
 
 func parseSecretName(raw string) (provider.Reference, error) {
 	parts := strings.Split(raw, "/")
 	if len(parts) < 2 || len(parts) > 3 || parts[0] == "" || parts[1] == "" {
-		return invalidReference()
+		return invalidReference("Secrets Manager reference requires region/secret-name[/key]")
 	}
 	name, err := url.PathUnescape(parts[1])
 	if err != nil || name == "" {
-		return invalidReference()
+		return invalidReference("Secrets Manager secret name has invalid percent-encoding")
 	}
 	key := ""
 	if len(parts) == 3 {
 		key = parts[2]
 		if key == "" {
-			return invalidReference()
+			return invalidReference("Secrets Manager key must not be empty")
 		}
 	}
 	return provider.Reference{Scheme: "aws-secrets-manager", Region: parts[0], Container: name, Key: key, AdapterKey: "secrets-manager\x00" + parts[0]}, nil
@@ -69,7 +69,7 @@ func parseSecretName(raw string) (provider.Reference, error) {
 func parseSecretARN(raw string) (provider.Reference, error) {
 	match := completeSecretARN.FindStringSubmatch(raw)
 	if match == nil {
-		return invalidReference()
+		return invalidReference("Secrets Manager ARN must be complete and include its six-character suffix")
 	}
 	return provider.Reference{Scheme: "aws-secrets-manager-arn", Region: match[2], Container: match[1], Key: match[3], AdapterKey: "secrets-manager\x00" + match[2]}, nil
 }
@@ -77,11 +77,11 @@ func parseSecretARN(raw string) (provider.Reference, error) {
 func parseParameter(raw string) (provider.Reference, error) {
 	separator := strings.IndexByte(raw, '/')
 	if separator <= 0 || separator == len(raw)-1 {
-		return invalidReference()
+		return invalidReference("SSM reference requires region/parameter-path")
 	}
 	return provider.Reference{Scheme: "aws-ssm", Region: raw[:separator], Container: "/" + strings.TrimLeft(raw[separator+1:], "/"), AdapterKey: "ssm\x00" + raw[:separator]}, nil
 }
 
-func invalidReference() (provider.Reference, error) {
-	return provider.Reference{}, &provider.Error{Kind: provider.InvalidBinding}
+func invalidReference(detail string) (provider.Reference, error) {
+	return provider.Reference{}, provider.InvalidReference(detail)
 }

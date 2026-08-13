@@ -33,16 +33,24 @@ func Bind(file *tpl.File, registry *provider.Registry) (*Plan, error) {
 	for _, entry := range file.Entries {
 		source, err := registry.Parse(entry.Source)
 		if err != nil {
-			return nil, fmt.Errorf("line %d: invalid source reference", entry.Line)
+			return nil, fmt.Errorf("line %d: invalid source reference: %s", entry.Line, provider.BindingDetail(err))
 		}
 		destination, err := registry.Parse(entry.Destination)
 		if err != nil {
-			return nil, fmt.Errorf("line %d: invalid destination reference", entry.Line)
+			return nil, fmt.Errorf("line %d: invalid destination reference: %s", entry.Line, provider.BindingDetail(err))
 		}
 		p.Mappings = append(p.Mappings, Mapping{entry.Key, source, destination})
 		destinations = append(destinations, destination)
 	}
 	if err := provider.ValidateDestinations(destinations); err != nil {
+		var conflict *provider.DestinationConflictError
+		if errors.As(err, &conflict) {
+			current, previous := file.Entries[conflict.Index], file.Entries[conflict.Previous]
+			if conflict.Mixed {
+				return nil, fmt.Errorf("line %d: destination mixes blob and keyed writes with line %d (%s)", current.Line, previous.Line, previous.Key)
+			}
+			return nil, fmt.Errorf("line %d: destination duplicates line %d (%s)", current.Line, previous.Line, previous.Key)
+		}
 		return nil, fmt.Errorf("invalid destination bindings")
 	}
 	return p, nil

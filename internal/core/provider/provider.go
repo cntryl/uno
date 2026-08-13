@@ -3,6 +3,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -23,9 +24,27 @@ const (
 	Other                ErrorKind = "Other"
 )
 
-type Error struct{ Kind ErrorKind }
+type Error struct {
+	Kind   ErrorKind
+	Detail string
+}
 
-func (e *Error) Error() string { return fmt.Sprintf("provider operation failed: %s", e.Kind) }
+func (e *Error) Error() string {
+	if e.Detail != "" {
+		return e.Detail
+	}
+	return fmt.Sprintf("provider operation failed: %s", e.Kind)
+}
+
+func InvalidReference(detail string) error { return &Error{Kind: InvalidBinding, Detail: detail} }
+
+func BindingDetail(err error) string {
+	var typed *Error
+	if errors.As(err, &typed) && typed.Detail != "" {
+		return typed.Detail
+	}
+	return string(InvalidBinding)
+}
 
 // Reference is an adapter-owned parsed locator. Container is the unit grouped
 // into one remote update; Key is empty for a complete-blob binding.
@@ -86,11 +105,11 @@ func (r *Registry) CapabilityPrefixes() []string {
 func (r *Registry) Parse(raw string) (Reference, error) {
 	i := strings.Index(raw, "://")
 	if i <= 0 {
-		return Reference{}, &Error{Kind: InvalidBinding}
+		return Reference{}, InvalidReference("expected provider reference with scheme://")
 	}
 	f := r.factories[raw[:i]]
 	if f == nil {
-		return Reference{}, &Error{Kind: InvalidBinding}
+		return Reference{}, InvalidReference("unknown provider scheme")
 	}
 	return f.Parse(raw)
 }
@@ -103,22 +122,33 @@ func (r *Registry) Adapter(ctx context.Context, ref Reference) (Adapter, error) 
 }
 
 func ValidateDestinations(refs []Reference) error {
-	seen := map[string]bool{}
-	mode := map[string]bool{}
-	for _, ref := range refs {
+	seen := map[string]int{}
+	type containerMode struct {
+		blob  bool
+		index int
+	}
+	mode := map[string]containerMode{}
+	for i, ref := range refs {
 		binding := ref.Binding()
-		if seen[binding] {
-			return &Error{Kind: InvalidBinding}
+		if previous, ok := seen[binding]; ok {
+			return &DestinationConflictError{Index: i, Previous: previous, Mixed: false}
 		}
-		seen[binding] = true
+		seen[binding] = i
 		container := strings.Join([]string{ref.Scheme, ref.Region, ref.Container}, "\x00")
-		if blob, ok := mode[container]; ok && blob != ref.Blob() {
-			return &Error{Kind: InvalidBinding}
+		if previous, ok := mode[container]; ok && previous.blob != ref.Blob() {
+			return &DestinationConflictError{Index: i, Previous: previous.index, Mixed: true}
 		}
-		mode[container] = ref.Blob()
+		mode[container] = containerMode{blob: ref.Blob(), index: i}
 	}
 	return nil
 }
+
+type DestinationConflictError struct {
+	Index, Previous int
+	Mixed           bool
+}
+
+func (e *DestinationConflictError) Error() string { return "invalid destination bindings" }
 
 func SortedWrites(w []Write) {
 	sort.Slice(w, func(i, j int) bool {

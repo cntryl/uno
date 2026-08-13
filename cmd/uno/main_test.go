@@ -192,6 +192,100 @@ func TestRunReadsWithoutWritingAndPreservesExitStatus(t *testing.T) {
 		t.Fatalf("code=%d reads=%d writes=%d err=%v", code, adapter.reads, adapter.writes, err)
 	}
 }
+
+func TestRunRequiresArgumentSeparator(t *testing.T) {
+	adapter := &cliAdapter{}
+	path := templateFile(t)
+	for _, args := range [][]string{
+		{"--template", path, "run", "/bin/echo", "--timeout", "30s"},
+		{"--template", path, "run", "/bin/echo", "--version"},
+	} {
+		_, err := executeWithRegistry(context.Background(), args, cliRegistry(adapter))
+		if err == nil || err.Error() != "run requires a command after --" {
+			t.Fatalf("args=%v err=%v", args, err)
+		}
+	}
+	if adapter.accesses != 0 {
+		t.Fatalf("provider accesses=%d", adapter.accesses)
+	}
+}
+
+func TestGlobalFlagValueIsNotTreatedAsCommand(t *testing.T) {
+	adapter := &cliAdapter{}
+	path := templateFile(t)
+	if _, err := executeWithRegistry(context.Background(), []string{"--template", path, "check"}, cliRegistry(adapter)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := executeWithRegistry(context.Background(), []string{"--template", "sync", "check"}, cliRegistry(adapter)); err == nil || err.Error() != "could not read secrets template" {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestSubcommandHelpDocumentsSyncAndRunSyntax(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"sync", "--help"}, "--dry-run"},
+		{[]string{"run", "--help"}, "run -- <command>"},
+	} {
+		output := captureStdout(t, func() {
+			if _, err := executeWithRegistry(context.Background(), tc.args, cliRegistry(&cliAdapter{})); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if !strings.Contains(output, tc.want) {
+			t.Fatalf("args=%v output=%q", tc.args, output)
+		}
+	}
+}
+
+func TestRunHonorsGlobalHelpAndVersionWithoutSeparator(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"run", "--version"}, "uno " + version + "\n"},
+		{[]string{"--version", "run"}, "uno " + version + "\n"},
+		{[]string{"--help", "run"}, "run -- <command>"},
+	} {
+		output := captureStdout(t, func() {
+			if _, err := executeWithRegistry(context.Background(), tc.args, cliRegistry(&cliAdapter{})); err != nil {
+				t.Fatalf("args=%v err=%v", tc.args, err)
+			}
+		})
+		if !strings.Contains(output, tc.want) {
+			t.Fatalf("args=%v output=%q want substring=%q", tc.args, output, tc.want)
+		}
+	}
+}
+
+func TestUnknownGlobalFlagIsReportedBeforeCommandDiscovery(t *testing.T) {
+	_, err := executeWithRegistry(context.Background(), []string{"--foo", "bar", "check"}, cliRegistry(&cliAdapter{}))
+	if err == nil || !strings.Contains(err.Error(), "flag provided but not defined: -foo") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func captureStdout(t *testing.T, action func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	defer func() { os.Stdout = old }()
+	action()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(output)
+}
 func TestDevWritesSortedEscapedFileWithRestrictedPermissions(t *testing.T) {
 	adapter := &cliAdapter{value: "line one\n\"$VALUE\"\\end"}
 	providers := cliRegistry(adapter)

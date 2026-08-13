@@ -71,7 +71,19 @@ func executeWithRegistry(ctx context.Context, args []string, providers *provider
 		return 0, fmt.Errorf("a command is required")
 	}
 	command := args[commandAt]
-	globals, commandArgs, err := extractGlobalFlags(append(args[:commandAt], args[commandAt+1:]...), command == "run")
+	runHasSeparator := false
+	if command == "run" {
+		for _, arg := range args[commandAt+1:] {
+			if arg == "--" {
+				runHasSeparator = true
+				break
+			}
+		}
+	}
+	withoutCommand := make([]string, 0, len(args)-1)
+	withoutCommand = append(withoutCommand, args[:commandAt]...)
+	withoutCommand = append(withoutCommand, args[commandAt+1:]...)
+	globals, commandArgs, err := extractGlobalFlags(withoutCommand, command == "run" && runHasSeparator)
 	if err != nil {
 		return 0, err
 	}
@@ -81,13 +93,16 @@ func executeWithRegistry(ctx context.Context, args []string, providers *provider
 	if a.timeout <= 0 {
 		return 0, fmt.Errorf("invalid arguments: timeout must be greater than zero")
 	}
-	if help || showVersion {
+	if (help || showVersion) && (command != "run" || runHasSeparator || len(commandArgs) == 0) {
 		if showVersion {
 			fmt.Printf("uno %s\n", version)
 		} else {
-			printHelp()
+			printCommandHelp(command)
 		}
 		return 0, nil
+	}
+	if command == "run" && (!runHasSeparator || len(commandArgs) < 2 || commandArgs[0] != "--") {
+		return 0, fmt.Errorf("run requires a command after --")
 	}
 	plan, err := a.load()
 	if err != nil {
@@ -112,8 +127,9 @@ func executeWithRegistry(ctx context.Context, args []string, providers *provider
 		}
 		if *dry {
 			for _, mapping := range plan.Mappings {
-				fmt.Printf("%s: would sync\n", mapping.Environment)
+				fmt.Printf("[dry-run] %s: would sync\n", mapping.Environment)
 			}
+			fmt.Printf("[dry-run] template valid: %d mappings; no providers contacted\n", len(plan.Mappings))
 			return 0, nil
 		}
 		opCtx, cancel := context.WithTimeout(ctx, a.timeout)
@@ -162,12 +178,7 @@ func executeWithRegistry(ctx context.Context, args []string, providers *provider
 		fmt.Printf("wrote .env.secrets with %d secrets\n", len(values))
 		return 0, nil
 	case "run":
-		if len(commandArgs) > 0 && commandArgs[0] == "--" {
-			commandArgs = commandArgs[1:]
-		}
-		if len(commandArgs) == 0 {
-			return 0, fmt.Errorf("run requires a command after --")
-		}
+		commandArgs = commandArgs[1:]
 		opCtx, cancel := context.WithTimeout(ctx, a.timeout)
 		values, err := engine.Resolve(opCtx, plan)
 		cancel()
@@ -231,10 +242,19 @@ func (a *app) load() (*engine.Plan, error) {
 	return plan, nil
 }
 func firstCommand(args []string) int {
-	for i, arg := range args {
-		if arg == "check" || arg == "sync" || arg == "dev" || arg == "run" {
-			return i
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--template" || arg == "--timeout" {
+			i++
+			continue
 		}
+		if arg == "--help" || arg == "-h" || arg == "--version" || strings.HasPrefix(arg, "--template=") || strings.HasPrefix(arg, "--timeout=") {
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			return -1
+		}
+		return i
 	}
 	return -1
 }
@@ -286,7 +306,7 @@ Usage: uno [OPTIONS] <COMMAND>
 
 Commands:
   check    Interpolate and validate mappings without provider access
-  sync     Resolve every source, then write all destinations
+  sync     Resolve every source, then write all destinations [--dry-run]
   dev      Resolve sources into a local .env.secrets file
   run      Resolve sources into a child process environment
 
@@ -296,4 +316,19 @@ Options:
   --help            Print help
   --version         Print version
 `)
+}
+
+func printCommandHelp(command string) {
+	switch command {
+	case "check":
+		fmt.Print("Usage: uno [OPTIONS] check\n\nValidate mappings without provider access.\n")
+	case "sync":
+		fmt.Print("Usage: uno [OPTIONS] sync [--dry-run]\n\nOptions:\n  --dry-run  Preview mappings without provider access\n")
+	case "dev":
+		fmt.Print("Usage: uno [OPTIONS] dev\n\nResolve sources into a local .env.secrets file.\n")
+	case "run":
+		fmt.Print("Usage: uno [OPTIONS] run -- <command> [args...]\n\nThe -- separator is required.\n")
+	default:
+		printHelp()
+	}
 }

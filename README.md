@@ -24,8 +24,10 @@ Follow this sequence unless the user explicitly requests something else:
    MY_DATABASE_URL=op://${OP_VAULT}/my-service/MY_DATABASE_URL -> aws-ssm://${AWS_REGION}/my-service/MY_DATABASE_URL
    ```
 
-3. Set every placeholder used by the template, then validate locally. These
-   commands do not contact providers and do not write anything:
+3. Set every placeholder used by the template, then validate locally. Use
+   `check` for a concise validity summary, or `sync --dry-run` for a
+   per-mapping preview of the sync plan. Neither command contacts providers or
+   writes anything:
 
    ```sh
    export OP_VAULT=my-vault
@@ -89,6 +91,8 @@ dotenv file. It never writes destination providers.
 
 `uno run -- <command> [args...]` injects the resolved values only into the child
 process, preserves argv and exit status, and does not create a secrets file.
+The `--` separator is required so flags intended for the child can never be
+interpreted as `uno` flags.
 The child can read every injected value, and same-user processes may also be
 able to inspect its environment through facilities such as
 `/proc/<pid>/environ` or `ps e`, depending on the platform and its security
