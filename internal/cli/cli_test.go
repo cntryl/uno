@@ -377,6 +377,17 @@ func templateFile(t *testing.T) string {
 	return path
 }
 
+func TestShouldAcceptTemplateWithNoMappingsGivenCheckCommand(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env.secrets-template")
+	if err := os.WriteFile(path, []byte("# mappings may be added later\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, output, err := run([]string{"--template", path, "check"}, cliRegistry(&cliAdapter{}))
+	if err != nil || output != "template valid: 0 mappings\n" {
+		t.Fatalf("output=%q err=%v", output, err)
+	}
+}
+
 func TestShouldSkipProviderAccessGivenCheckOrDryRunCommand(t *testing.T) {
 	adapter := &cliAdapter{}
 	providers := cliRegistry(adapter)
@@ -599,6 +610,39 @@ func TestShouldWriteEscapedSecretsFileWithRestrictedPermissionsGivenDevCommand(t
 	}
 	if (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) || adapter.reads != 1 || adapter.writes != 0 {
 		t.Fatalf("mode=%o reads=%d writes=%d", info.Mode().Perm(), adapter.reads, adapter.writes)
+	}
+}
+
+func TestShouldLeaveExistingSecretsFileUnchangedGivenDevTemplateWithNoMappings(t *testing.T) {
+	adapter := &cliAdapter{}
+	t.Chdir(t.TempDir())
+	if err := exec.CommandContext(t.Context(), "git", "init", "-q").Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(".gitignore", []byte(".env.secrets*\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const existing = "MY_API_KEY=existing-value\n"
+	if err := os.WriteFile(".env.secrets", []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), ".env.secrets-template")
+	if err := os.WriteFile(path, []byte("# mappings may be added later\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, output, err := run([]string{"--template", path, "dev"}, cliRegistry(adapter))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(".env.secrets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != existing || adapter.accesses != 0 || adapter.reads != 0 {
+		t.Fatalf("contents=%q accesses=%d reads=%d", data, adapter.accesses, adapter.reads)
+	}
+	if output != "no mappings; left .env.secrets unchanged\n" {
+		t.Fatalf("output=%q", output)
 	}
 }
 

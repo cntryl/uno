@@ -137,9 +137,6 @@ func parseEnv(input string, env func(string) (string, bool), expandDestinations 
 			return nil, terr(alias.line, 1, "destination alias is unused")
 		}
 	}
-	if len(f.Entries) == 0 {
-		return nil, terr(1, 1, "template must contain at least one mapping")
-	}
 	return f, nil
 }
 

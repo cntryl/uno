@@ -215,6 +215,10 @@ func Execute(ctx context.Context, args []string, providers *provider.Registry, r
 		if err != nil {
 			return 0, err
 		}
+		if len(plan.Mappings) == 0 {
+			_, _ = fmt.Fprintln(a.runtime.Stdout, "no mappings; left .env.secrets unchanged")
+			return 0, nil
+		}
 		opCtx, cancel := context.WithTimeout(ctx, a.timeout)
 		defer cancel()
 		if err := devguard.Check(opCtx, "."); err != nil {

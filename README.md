@@ -147,6 +147,7 @@ ENV_KEY=<source reference> -> <destination reference>
   explicit destination reference when the destination field or parameter name
   must differ.
 - Blank lines and full-line comments are ignored.
+- A blank or comment-only template is valid and represents zero mappings.
 - Missing variables, malformed references, NUL, duplicate environment keys,
   duplicate destinations, and mixed blob/key writes to one container fail
   closed.
@@ -175,6 +176,8 @@ If the current directory contains `Dockerfile` or `Dockerfile.*`,
 untracked and must not be a symlink. `dev` then resolves every source
 and atomically replaces `.env.secrets` with a deterministic owner-only (`0600`)
 dotenv file. It never writes destination providers.
+If the template has no mappings, `uno dev` succeeds without creating or
+replacing `.env.secrets`.
 
 `uno run -- <command> [args...]` injects the resolved values only into the child
 process, preserves argv and exit status, and does not create a secrets file.

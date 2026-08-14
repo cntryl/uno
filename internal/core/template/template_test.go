@@ -40,10 +40,19 @@ func TestShouldExpandAliasPlaceholdersOnceGivenExpandedValueContainsVariableSynt
 	}
 }
 func TestShouldFailGivenMalformedOrIncompleteInput(t *testing.T) {
-	cases := []string{"", "# comment only", "K=op://$MISSING/i/f -> aws-ssm://r/p", "K=x", "K=x -> y -> z", "K=x -> y\nK=a -> b", "K=x\x00 -> y"}
+	cases := []string{"K=op://$MISSING/i/f -> aws-ssm://r/p", "K=x", "K=x -> y -> z", "K=x -> y\nK=a -> b", "K=x\x00 -> y"}
 	for _, input := range cases {
 		if _, err := ParseEnv(input, func(string) (string, bool) { return "", false }); err == nil {
 			t.Fatalf("expected failure for %q", input)
+		}
+	}
+}
+
+func TestShouldAllowTemplateWithNoMappings(t *testing.T) {
+	for _, input := range []string{"", "\n", "# no secrets are mapped yet\n\n"} {
+		file, err := ParseEnv(input, func(string) (string, bool) { return "", false })
+		if err != nil || file == nil || len(file.Entries) != 0 {
+			t.Fatalf("input=%q file=%#v err=%v", input, file, err)
 		}
 	}
 }
@@ -191,8 +200,8 @@ func FuzzParseEnv(f *testing.F) {
 			value, ok := env[key]
 			return value, ok
 		})
-		if err == nil && (file == nil || len(file.Entries) == 0) {
-			t.Fatalf("successful parse returned no entries")
+		if err == nil && file == nil {
+			t.Fatal("successful parse returned nil file")
 		}
 		if err != nil && (strings.Contains(err.Error(), env["VAULT"]) || strings.Contains(err.Error(), env["REGION"])) {
 			t.Fatalf("unsafe error: %v", err)
