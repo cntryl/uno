@@ -1,0 +1,53 @@
+name: Build Darwin Binaries
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  darwin:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            runner: macos-15
+          - target: darwin-x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository at the tested commit
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version: '1.26.6'
+          cache: true
+
+      - name: Build and verify backward-compatible binary
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '13.5'
+          CGO_CFLAGS: -mmacosx-version-min=13.5
+          CGO_LDFLAGS: -mmacosx-version-min=13.5
+        shell: bash
+        run: |
+          binary="native/${{ matrix.target }}/uno"
+          mkdir -p "$(dirname "$binary")"
+          CGO_ENABLED=1 go build -trimpath -ldflags='-s -w' -o "$binary" ./cmd/uno
+          "./$binary" --version
+          deployment_target="$(otool -l "$binary" | awk '$1 == "minos" { print $2; exit }')"
+          test "$deployment_target" = 13.5
+
+      - name: Upload Darwin binary
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: native-${{ matrix.target }}
+          path: native/${{ matrix.target }}/uno
+          if-no-files-found: error

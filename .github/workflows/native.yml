@@ -7,136 +7,17 @@ on:
 permissions: {}
 
 jobs:
-  native:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: darwin-arm64
-            runner: macos-15
-            binary: uno
-          - target: darwin-x64
-            runner: macos-15-intel
-            binary: uno
-          - target: win32-arm64
-            runner: windows-11-arm
-            binary: uno.exe
-          - target: win32-x64
-            runner: windows-2025
-            binary: uno.exe
-    runs-on: ${{ matrix.runner }}
+  darwin:
+    uses: ./.github/workflows/darwin.yml
     permissions:
       contents: read
-    steps:
-      - name: Check out repository at the tested commit
-        uses: actions/checkout@v7.0.1
-        with:
-          ref: ${{ github.sha }}
-
-      - name: Set up Go
-        uses: actions/setup-go@v7.0.0
-        with:
-          go-version: '1.26.6'
-          cache: true
-
-      - name: Build backward-compatible macOS binary
-        if: runner.os == 'macOS'
-        env:
-          MACOSX_DEPLOYMENT_TARGET: '13.5'
-          CGO_CFLAGS: -mmacosx-version-min=13.5
-          CGO_LDFLAGS: -mmacosx-version-min=13.5
-        shell: bash
-        run: |
-          mkdir -p native/${{ matrix.target }}
-          CGO_ENABLED=1 go build -trimpath -ldflags='-s -w' -o native/${{ matrix.target }}/${{ matrix.binary }} ./cmd/uno
-          ./native/${{ matrix.target }}/${{ matrix.binary }} --version
-          deployment_target="$(otool -l native/${{ matrix.target }}/${{ matrix.binary }} | awk '$1 == "minos" { print $2; exit }')"
-          test "$deployment_target" = 13.5
-
-      - name: Build Windows binary
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          mkdir -p native/${{ matrix.target }}
-          CGO_ENABLED=1 go build -trimpath -ldflags='-s -w' -o native/${{ matrix.target }}/${{ matrix.binary }} ./cmd/uno
-          ./native/${{ matrix.target }}/${{ matrix.binary }} --version
-
-      - name: Upload native binary
-        uses: actions/upload-artifact@v7.0.1
-        with:
-          name: native-${{ matrix.target }}
-          path: native/${{ matrix.target }}/${{ matrix.binary }}
-          if-no-files-found: error
 
   linux:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-            image: quay.io/pypa/manylinux_2_28_aarch64@sha256:b9dd5b2d6885fae144119ac934978003bcc413087ea08f602a960257205ec246
-          - arch: x64
-            runner: ubuntu-24.04
-            image: quay.io/pypa/manylinux_2_28_x86_64@sha256:f854c50adf7b7a325bc4794316f3758d387a41d61f9e2ebca0f26c7dc8f761d4
-    runs-on: ${{ matrix.runner }}
-    container:
-      image: ${{ matrix.image }}
+    uses: ./.github/workflows/linux.yml
     permissions:
       contents: read
-    steps:
-      - name: Check out repository at the tested commit
-        uses: actions/checkout@v7.0.1
-        with:
-          ref: ${{ github.sha }}
 
-      - name: Set up Go
-        uses: actions/setup-go@v7.0.0
-        with:
-          go-version: '1.26.6'
-          cache: true
-
-      - name: Trust the container checkout
-        shell: bash
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      - name: Build and verify glibc 2.28 binary
-        shell: bash
-        run: |
-          binary="native/linux-${{ matrix.arch }}-glibc/uno"
-          mkdir -p "$(dirname "$binary")"
-          CGO_ENABLED=1 go build -trimpath -ldflags='-s -w' -o "$binary" ./cmd/uno
-          "./$binary" --version
-          vcs_revision="$(go version -m "$binary" | awk -F= '$1 ~ /vcs\.revision$/ { print $2; exit }')"
-          test "$vcs_revision" = "$GITHUB_SHA"
-          max_glibc="$(readelf --version-info "$binary" | awk '/Name: GLIBC_[0-9]/{sub(/^.*GLIBC_/, ""); print $1}' | sort -V | tail -n1)"
-          test -n "$max_glibc"
-          test "$(printf '%s\n' 2.28 "$max_glibc" | sort -V | tail -n1)" = 2.28
-
-      - name: Build and verify static musl-compatible binary
-        shell: bash
-        run: |
-          binary="native/linux-${{ matrix.arch }}-musl/uno"
-          mkdir -p "$(dirname "$binary")"
-          CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o "$binary" ./cmd/uno
-          "./$binary" --version
-          vcs_revision="$(go version -m "$binary" | awk -F= '$1 ~ /vcs\.revision$/ { print $2; exit }')"
-          test "$vcs_revision" = "$GITHUB_SHA"
-          if readelf --dynamic "$binary" | grep -q '(NEEDED)'; then
-            echo 'musl-compatible binary must not require a dynamic libc' >&2
-            exit 1
-          fi
-
-      - name: Upload glibc binary
-        uses: actions/upload-artifact@v7.0.1
-        with:
-          name: native-linux-${{ matrix.arch }}-glibc
-          path: native/linux-${{ matrix.arch }}-glibc/uno
-          if-no-files-found: error
-
-      - name: Upload musl binary
-        uses: actions/upload-artifact@v7.0.1
-        with:
-          name: native-linux-${{ matrix.arch }}-musl
-          path: native/linux-${{ matrix.arch }}-musl/uno
-          if-no-files-found: error
+  windows:
+    uses: ./.github/workflows/windows.yml
+    permissions:
+      contents: read
