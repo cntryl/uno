@@ -9,6 +9,18 @@ const publishWorkflow = readFileSync('.github/workflows/publish.yml', 'utf8');
 const windowsWorkflow = readFileSync('.github/workflows/windows.yml', 'utf8');
 
 describe('release artifact integrity', () => {
+  test('should cancel superseded platform runs only within the same workflow and branch given the workflow files', () => {
+    for (const [workflow, group] of [
+      [nativeWorkflow, 'group: uno-native-${{ github.workflow }}-${{ github.ref }}'],
+      [darwinWorkflow, 'group: uno-darwin-${{ github.workflow }}-${{ github.ref }}'],
+      [linuxWorkflow, 'group: uno-linux-${{ github.workflow }}-${{ github.ref }}'],
+      [windowsWorkflow, 'group: uno-windows-${{ github.workflow }}-${{ github.ref }}'],
+    ]) {
+      expect(workflow).toContain(group);
+      expect(workflow).toContain('cancel-in-progress: true');
+    }
+  });
+
   test('should delegate each platform to a focused reusable workflow given the native workflow file', () => {
     expect(nativeWorkflow).toMatch(/darwin:\n    uses: \.\/\.github\/workflows\/darwin\.yml/);
     expect(nativeWorkflow).toMatch(/linux:\n    uses: \.\/\.github\/workflows\/linux\.yml/);

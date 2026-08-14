@@ -5,6 +5,9 @@ on:
   workflow_dispatch:
 
 permissions: {}
+concurrency:
+  group: uno-linux-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   linux:
