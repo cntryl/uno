@@ -45,6 +45,15 @@ describe('release artifact integrity', () => {
     expect(nativeWorkflow).toContain('= 13.5');
   });
 
+  test('should trust the container checkout and verify the exact VCS revision given the native workflow file', () => {
+    expect(nativeWorkflow).toContain(
+      'git config --global --add safe.directory "$GITHUB_WORKSPACE"',
+    );
+    expect(nativeWorkflow).toContain('go version -m "$binary"');
+    expect(nativeWorkflow).toContain('vcs\\.revision');
+    expect(nativeWorkflow.match(/test "\$vcs_revision" = "\$GITHUB_SHA"/g)).toHaveLength(2);
+  });
+
   test('should build glibc 2.28 and static musl Linux binaries on native architectures given the native workflow file', () => {
     expect(nativeWorkflow).toMatch(/^  linux:\n/m);
     expect(nativeWorkflow).toContain('quay.io/pypa/manylinux_2_28_aarch64@sha256:');

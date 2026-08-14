@@ -96,6 +96,10 @@ jobs:
           go-version: '1.26.6'
           cache: true
 
+      - name: Trust the container checkout
+        shell: bash
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Build and verify glibc 2.28 binary
         shell: bash
         run: |
@@ -103,6 +107,8 @@ jobs:
           mkdir -p "$(dirname "$binary")"
           CGO_ENABLED=1 go build -trimpath -ldflags='-s -w' -o "$binary" ./cmd/uno
           "./$binary" --version
+          vcs_revision="$(go version -m "$binary" | awk -F= '$1 ~ /vcs\.revision$/ { print $2; exit }')"
+          test "$vcs_revision" = "$GITHUB_SHA"
           max_glibc="$(readelf --version-info "$binary" | awk '/Name: GLIBC_[0-9]/{sub(/^.*GLIBC_/, ""); print $1}' | sort -V | tail -n1)"
           test -n "$max_glibc"
           test "$(printf '%s\n' 2.28 "$max_glibc" | sort -V | tail -n1)" = 2.28
@@ -114,6 +120,8 @@ jobs:
           mkdir -p "$(dirname "$binary")"
           CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o "$binary" ./cmd/uno
           "./$binary" --version
+          vcs_revision="$(go version -m "$binary" | awk -F= '$1 ~ /vcs\.revision$/ { print $2; exit }')"
+          test "$vcs_revision" = "$GITHUB_SHA"
           if readelf --dynamic "$binary" | grep -q '(NEEDED)'; then
             echo 'musl-compatible binary must not require a dynamic libc' >&2
             exit 1
