@@ -5,22 +5,38 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
-import { LauncherError, selectPlatform } from './platform.js';
+import { LauncherError, type LinuxLibc, selectPlatform } from './platform.js';
+
+interface DiagnosticReport {
+  readonly header?: {
+    readonly glibcVersionRuntime?: unknown;
+  };
+}
 
 export interface ResolveBinaryOptions {
   readonly platform?: NodeJS.Platform;
   readonly arch?: string;
+  readonly linuxLibc?: LinuxLibc;
   readonly packageDirectory?: string;
   readonly stat?: (path: string) => { isFile(): boolean };
+}
+
+export function detectLinuxLibc(report: DiagnosticReport = process.report.getReport()): LinuxLibc {
+  return typeof report.header?.glibcVersionRuntime === 'string' ? 'glibc' : 'musl';
 }
 
 export function resolveBinary({
   platform = process.platform,
   arch = process.arch,
+  linuxLibc,
   packageDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'),
   stat = statSync,
 }: ResolveBinaryOptions = {}): string {
-  const selected = selectPlatform(platform, arch);
+  const selected = selectPlatform(
+    platform,
+    arch,
+    platform === 'linux' ? (linuxLibc ?? detectLinuxLibc()) : undefined,
+  );
   const binaryPath = path.join(packageDirectory, selected.binaryPath);
 
   try {

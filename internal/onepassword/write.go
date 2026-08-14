@@ -20,6 +20,11 @@ func (a *Adapter) WriteMany(ctx context.Context, writes []provider.Write) (provi
 	if len(writes) == 0 {
 		return provider.Receipt{}, nil
 	}
+	for _, write := range writes {
+		if sourceOnly(write.Reference) {
+			return provider.Receipt{}, &provider.Error{Kind: provider.InvalidBinding}
+		}
+	}
 	provider.SortedWrites(writes)
 	for attempt := 0; attempt <= conflictRetries; attempt++ {
 		item, err := a.load(ctx, writes[0].Reference)

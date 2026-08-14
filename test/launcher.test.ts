@@ -5,7 +5,7 @@ import process from 'node:process';
 
 import { describe, expect, test, vi } from 'vite-plus/test';
 
-import { resolveBinary, runBinary } from '../src/launcher.js';
+import { detectLinuxLibc, resolveBinary, runBinary } from '../src/launcher.js';
 import { LauncherError } from '../src/platform.js';
 
 describe('resolveBinary', () => {
@@ -26,10 +26,33 @@ describe('resolveBinary', () => {
       resolveBinary({
         platform: 'linux',
         arch: 'x64',
+        linuxLibc: 'glibc',
         packageDirectory: '/package',
         stat: () => ({ isFile: () => true }),
       }),
-    ).toBe(path.join('/package', 'native', 'linux-x64', 'uno'));
+    ).toBe(path.join('/package', 'native', 'linux-x64-glibc', 'uno'));
+  });
+
+  test('should return the musl binary path given a Linux runtime without glibc', () => {
+    expect(
+      resolveBinary({
+        platform: 'linux',
+        arch: 'arm64',
+        linuxLibc: 'musl',
+        packageDirectory: '/package',
+        stat: () => ({ isFile: () => true }),
+      }),
+    ).toBe(path.join('/package', 'native', 'linux-arm64-musl', 'uno'));
+  });
+});
+
+describe('detectLinuxLibc', () => {
+  test('should detect glibc given a runtime glibc version in the Node diagnostic report', () => {
+    expect(detectLinuxLibc({ header: { glibcVersionRuntime: '2.28' } })).toBe('glibc');
+  });
+
+  test('should detect musl given no runtime glibc version in the Node diagnostic report', () => {
+    expect(detectLinuxLibc({ header: {} })).toBe('musl');
   });
 });
 

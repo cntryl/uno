@@ -5,6 +5,17 @@ destination references. The secret engine is a Go CLI distributed as bundled
 native binaries through npm. It never generates secrets and never invokes the
 1Password `op` command.
 
+## Runtime support
+
+The npm launcher requires Node.js 24.11 or later and bundles binaries for macOS
+13.5 or later, Windows 10 or later, and Linux on ARM64 or x64. Linux packages
+include separate glibc 2.28 and static musl-compatible binaries; the launcher
+selects the matching libc variant without downloading anything at runtime.
+
+1Password desktop-app authentication on Linux requires the glibc variant and a
+supported 1Password desktop installation. The musl-compatible binary supports
+service-account authentication but not desktop-app authentication.
+
 ## Agent quick start
 
 Follow this sequence unless the user explicitly requests something else:
@@ -184,13 +195,27 @@ that way.
 op://vault/item
 op://vault/item/field
 op://vault/item/path1/path2/field
+op://vault/item?notes
+op://vault/item?document
+op://vault/item?file=field
+op://vault/item?file=path1/path2/field
 ```
 
 An item-only reference addresses the Secure Note body. Otherwise, the final
-segment is a concealed field and intermediate segments form one canonical
-section path. Vaults, items, sections, and fields resolve by exact title or ID;
-ambiguity fails. Set `OP_SERVICE_ACCOUNT_TOKEN` in CI or `OP_ACCOUNT` for
-desktop integration. The service-account token takes precedence.
+segment is a field and intermediate segments form one canonical section path.
+Source reads accept both concealed and plain fields; destination writes remain
+concealed and destination items must be Secure Notes. Vaults, items, sections,
+and fields resolve by exact title or ID; ambiguity fails. Set
+`OP_SERVICE_ACCOUNT_TOKEN` in CI or set `OP_ACCOUNT` to the desktop app's
+account display name or account UUID (not its sign-in URL). The service-account
+token takes precedence.
+
+The source-only `?notes` selector reads the notes text from any item category.
+The source-only `?document` selector reads a Document item's contents. The
+source-only `?file=` selector reads an attached file, matching its field ID,
+file ID, or filename within the selected section. Document and attachment
+contents must be UTF-8 text without NUL bytes; binary content is rejected. These
+selectors cannot be used as destinations.
 
 A destination alias prefix ends at the item; `ENV_KEY` becomes its field (or
 the final field below a section path included in the prefix). Destination items

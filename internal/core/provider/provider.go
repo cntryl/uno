@@ -103,6 +103,13 @@ func DestroyReadResults(results map[string]ReadResult) {
 type Reader interface {
 	ReadMany(context.Context, []Reference) (map[string]ReadResult, error)
 }
+
+// DestinationReader is an optional adapter capability for providers whose
+// valid source bindings differ from their valid destination bindings.
+type DestinationReader interface {
+	ReadDestinations(context.Context, []Reference) (map[string]ReadResult, error)
+}
+
 type Writer interface {
 	WriteMany(context.Context, []Write) (Receipt, error)
 }

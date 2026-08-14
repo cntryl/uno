@@ -27,7 +27,8 @@ func Parse(raw string) (provider.Reference, error) {
 	if !strings.HasPrefix(raw, "op://") {
 		return provider.InvalidParse("1Password reference must start with op://")
 	}
-	parts := strings.Split(strings.TrimPrefix(raw, "op://"), "/")
+	resource, query, hasQuery := strings.Cut(strings.TrimPrefix(raw, "op://"), "?")
+	parts := strings.Split(resource, "/")
 	if len(parts) < 2 {
 		return provider.InvalidParse("1Password reference requires vault/item[/field]")
 	}
@@ -37,7 +38,28 @@ func Parse(raw string) (provider.Reference, error) {
 		}
 	}
 	key := ""
-	if len(parts) > 2 {
+	if hasQuery {
+		if len(parts) != 2 {
+			return provider.InvalidParse("1Password content selectors require an item-only path")
+		}
+		switch {
+		case query == "notes":
+			key = notesSelector
+		case query == "document":
+			key = documentSelector
+		case strings.HasPrefix(query, "file="):
+			selector := strings.TrimPrefix(query, "file=")
+			segments := strings.Split(selector, "/")
+			for _, segment := range segments {
+				if segment == "" || strings.ContainsRune(segment, '?') {
+					return provider.InvalidParse("1Password file selector requires non-empty path segments")
+				}
+			}
+			key = fileSelectorPrefix + selector
+		default:
+			return provider.InvalidParse("unknown 1Password content selector")
+		}
+	} else if len(parts) > 2 {
 		key = strings.Join(parts[2:], "/")
 	}
 	return provider.Reference{Scheme: "op", Region: parts[0], Container: parts[1], Key: key, AdapterKey: "op"}, nil

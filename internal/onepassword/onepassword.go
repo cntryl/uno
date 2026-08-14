@@ -1,12 +1,14 @@
-// Package onepassword adapts explicit 1Password Secure Note references.
+// Package onepassword adapts 1Password item sources and Secure Note destinations.
 package onepassword
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	op "github.com/1password/onepassword-sdk-go"
 	"github.com/cntryl/uno/internal/core/provider"
@@ -21,6 +23,7 @@ type LookupAPI interface {
 	ListVaults(context.Context) ([]op.VaultOverview, error)
 	ListItems(context.Context, string) ([]op.ItemOverview, error)
 	GetItem(context.Context, string, string) (op.Item, error)
+	ReadFile(context.Context, string, string, op.FileAttributes) ([]byte, error)
 }
 type MutationAPI interface {
 	PutItem(context.Context, op.Item) (op.Item, error)
@@ -36,7 +39,16 @@ func (s sdkAPI) ListItems(c context.Context, v string) ([]op.ItemOverview, error
 func (s sdkAPI) GetItem(c context.Context, v, i string) (op.Item, error) {
 	return s.c.Items().Get(c, v, i)
 }
+func (s sdkAPI) ReadFile(c context.Context, vault, item string, attributes op.FileAttributes) ([]byte, error) {
+	return s.c.Items().Files().Read(c, vault, item, attributes)
+}
 func (s sdkAPI) PutItem(c context.Context, i op.Item) (op.Item, error) { return s.c.Items().Put(c, i) }
+
+const (
+	notesSelector      = "?notes"
+	documentSelector   = "?document"
+	fileSelectorPrefix = "?file="
+)
 
 type Adapter struct {
 	lookup       LookupAPI
@@ -131,11 +143,26 @@ func (a *Adapter) load(ctx context.Context, ref provider.Reference) (*op.Item, e
 	return &item, nil
 }
 func (a *Adapter) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]provider.ReadResult, error) {
+	return a.readMany(ctx, refs, false)
+}
+
+func (a *Adapter) ReadDestinations(ctx context.Context, refs []provider.Reference) (map[string]provider.ReadResult, error) {
+	return a.readMany(ctx, refs, true)
+}
+
+func (a *Adapter) readMany(ctx context.Context, refs []provider.Reference, destination bool) (map[string]provider.ReadResult, error) {
 	if err := provider.ValidateReadGroup(refs); err != nil {
 		return nil, err
 	}
 	if len(refs) == 0 {
 		return nil, nil
+	}
+	if destination {
+		for _, ref := range refs {
+			if sourceOnly(ref) {
+				return nil, &provider.Error{Kind: provider.InvalidBinding}
+			}
+		}
 	}
 	item, err := a.load(ctx, refs[0])
 	if err != nil {
@@ -144,7 +171,7 @@ func (a *Adapter) ReadMany(ctx context.Context, refs []provider.Reference) (map[
 	if item == nil {
 		return provider.MissingResults(refs), nil
 	}
-	if item.Category != op.ItemCategorySecureNote {
+	if destination && item.Category != op.ItemCategorySecureNote {
 		return nil, &provider.Error{Kind: provider.InvalidState}
 	}
 	values := make(map[string]provider.ReadResult, len(refs))
@@ -153,7 +180,30 @@ func (a *Adapter) ReadMany(ctx context.Context, refs []provider.Reference) (map[
 		return nil, err
 	}
 	for _, ref := range refs {
+		if ref.Key == notesSelector {
+			values[ref.Binding()] = provider.ReadResult{Value: secret.New(item.Notes), Found: true}
+			continue
+		}
+		if ref.Key == documentSelector {
+			result, err := a.readDocument(ctx, item)
+			if err != nil {
+				return fail(err)
+			}
+			values[ref.Binding()] = result
+			continue
+		}
+		if selector, ok := strings.CutPrefix(ref.Key, fileSelectorPrefix); ok {
+			result, err := a.readAttachment(ctx, item, selector)
+			if err != nil {
+				return fail(err)
+			}
+			values[ref.Binding()] = result
+			continue
+		}
 		if ref.Blob() {
+			if item.Category != op.ItemCategorySecureNote {
+				return fail(&provider.Error{Kind: provider.InvalidState})
+			}
 			values[ref.Binding()] = provider.ReadResult{Value: secret.New(item.Notes), Found: true}
 			continue
 		}
@@ -164,7 +214,7 @@ func (a *Adapter) ReadMany(ctx context.Context, refs []provider.Reference) (map[
 		}
 		matches := []op.ItemField{}
 		for _, candidate := range item.Fields {
-			if (candidate.ID == field || candidate.Title == field) && candidate.FieldType == op.ItemFieldTypeConcealed && sameSection(candidate.SectionID, sectionID) {
+			if (candidate.ID == field || candidate.Title == field) && sameSection(candidate.SectionID, sectionID) && (!destination || candidate.FieldType == op.ItemFieldTypeConcealed) {
 				matches = append(matches, candidate)
 			}
 		}
@@ -179,6 +229,52 @@ func (a *Adapter) ReadMany(ctx context.Context, refs []provider.Reference) (map[
 	}
 	return values, nil
 }
+
+func (a *Adapter) readDocument(ctx context.Context, item *op.Item) (provider.ReadResult, error) {
+	if item.Category != op.ItemCategoryDocument || item.Document == nil {
+		return provider.ReadResult{}, &provider.Error{Kind: provider.InvalidState}
+	}
+	return a.readFile(ctx, item, *item.Document)
+}
+
+func (a *Adapter) readAttachment(ctx context.Context, item *op.Item, selector string) (provider.ReadResult, error) {
+	section, file := splitKey(selector)
+	sectionID, err := findSection(item, section)
+	if err != nil {
+		return provider.ReadResult{}, err
+	}
+	matches := make([]op.FileAttributes, 0, 1)
+	for _, candidate := range item.Files {
+		candidateSection := &candidate.SectionID
+		if sameSection(candidateSection, sectionID) && (candidate.FieldID == file || candidate.Attributes.ID == file || candidate.Attributes.Name == file) {
+			matches = append(matches, candidate.Attributes)
+		}
+	}
+	if len(matches) == 0 {
+		return provider.ReadResult{}, nil
+	}
+	if len(matches) > 1 {
+		return provider.ReadResult{}, &provider.Error{Kind: provider.Ambiguous}
+	}
+	return a.readFile(ctx, item, matches[0])
+}
+
+func (a *Adapter) readFile(ctx context.Context, item *op.Item, attributes op.FileAttributes) (provider.ReadResult, error) {
+	content, err := a.lookup.ReadFile(ctx, item.VaultID, item.ID, attributes)
+	defer secret.DestroyBytes(content)
+	if err != nil {
+		return provider.ReadResult{}, remote(err)
+	}
+	if bytes.IndexByte(content, 0) >= 0 || !utf8.Valid(content) {
+		return provider.ReadResult{}, &provider.Error{Kind: provider.InvalidState}
+	}
+	return provider.ReadResult{Value: secret.NewBytes(content), Found: true}, nil
+}
+
+func sourceOnly(ref provider.Reference) bool {
+	return ref.Key == notesSelector || ref.Key == documentSelector || strings.HasPrefix(ref.Key, fileSelectorPrefix)
+}
+
 func splitKey(key string) (string, string) {
 	i := strings.LastIndexByte(key, '/')
 	if i < 0 {
@@ -205,10 +301,13 @@ func findSection(item *op.Item, title string) (*string, error) {
 	return &ids[0], nil
 }
 func sameSection(a, b *string) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
+	section := func(value *string) string {
+		if value == nil {
+			return ""
+		}
+		return *value
 	}
-	return *a == *b
+	return section(a) == section(b)
 }
 func remote(err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

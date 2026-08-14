@@ -18,8 +18,10 @@ describe('package metadata', () => {
       'dist/cli.js',
       'native/darwin-arm64/uno',
       'native/darwin-x64/uno',
-      'native/linux-arm64/uno',
-      'native/linux-x64/uno',
+      'native/linux-arm64-glibc/uno',
+      'native/linux-arm64-musl/uno',
+      'native/linux-x64-glibc/uno',
+      'native/linux-x64-musl/uno',
       'native/win32-arm64/uno.exe',
       'native/win32-x64/uno.exe',
       'README.md',
@@ -35,5 +37,12 @@ describe('package metadata', () => {
     const source = readFileSync(path.join(repositoryRoot, 'internal/version/version.go'), 'utf8');
     const goVersion = source.match(/^const Current = "([^"]+)"$/m)?.[1];
     expect(goVersion).toBe(packageJson.version);
+  });
+
+  test('should verify installed archives against package metadata without a stale version literal', () => {
+    const verifier = readFileSync(path.join(repositoryRoot, 'scripts/verify-package.mjs'), 'utf8');
+    expect(verifier).toContain('fileURLToPath(import.meta.url)');
+    expect(verifier).toContain("readFileSync(join(repositoryRoot, 'package.json')");
+    expect(verifier).not.toMatch(/metadata\.version !== '\\d+\.\\d+\.\\d+'/);
   });
 });

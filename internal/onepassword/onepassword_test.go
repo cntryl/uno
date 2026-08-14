@@ -1,8 +1,10 @@
 package onepassword
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +24,10 @@ type fakeAPI struct {
 	typedConflicts bool
 	vaultLists     int
 	itemLists      int
+	itemGets       int
+	fileContents   map[string][]byte
+	fileReads      []string
+	fileErr        error
 }
 
 type fakeVersionConflictError struct{}
@@ -37,7 +43,14 @@ func (f *fakeAPI) ListItems(context.Context, string) ([]op.ItemOverview, error) 
 	f.itemLists++
 	return f.items, nil
 }
-func (f *fakeAPI) GetItem(context.Context, string, string) (op.Item, error) { return f.item, nil }
+func (f *fakeAPI) GetItem(context.Context, string, string) (op.Item, error) {
+	f.itemGets++
+	return f.item, nil
+}
+func (f *fakeAPI) ReadFile(_ context.Context, _, _ string, attributes op.FileAttributes) ([]byte, error) {
+	f.fileReads = append(f.fileReads, attributes.ID)
+	return f.fileContents[attributes.ID], f.fileErr
+}
 func (f *fakeAPI) CreateItem(_ context.Context, p op.ItemCreateParams) (op.Item, error) {
 	f.created = p
 	return op.Item{ID: "new"}, nil
@@ -147,13 +160,43 @@ func TestShouldParseSuccessfullyGivenValidOpReferenceVariants(t *testing.T) {
 	}
 }
 
+func TestShouldParseSourceOnlyContentSelectors(t *testing.T) {
+	for raw, key := range map[string]string{
+		"op://vault/item?notes":                    "?notes",
+		"op://vault/item?document":                 "?document",
+		"op://vault/item?file=certificate.pem":     "?file=certificate.pem",
+		"op://vault/item?file=path/to/config.json": "?file=path/to/config.json",
+	} {
+		ref, err := Parse(raw)
+		if err != nil || ref.Scheme != "op" || ref.Region != "vault" || ref.Container != "item" || ref.Key != key {
+			t.Fatalf("%s: ref=%#v err=%v", raw, ref, err)
+		}
+	}
+
+	for _, raw := range []string{
+		"op://vault/item?",
+		"op://vault/item?unknown",
+		"op://vault/item?file=",
+		"op://vault/item?file=path//file",
+		"op://vault/item/field?document",
+	} {
+		if _, err := Parse(raw); err == nil {
+			t.Fatalf("%s: expected parse failure", raw)
+		}
+	}
+}
+
 func FuzzParseReference(f *testing.F) {
 	for _, seed := range []string{
 		"op://vault/item",
 		"op://vault/item/field",
 		"op://vault/item/path1/path2/field",
+		"op://vault/item?notes",
+		"op://vault/item?document",
+		"op://vault/item?file=path/to/file",
 		"op://",
 		"op://vault//field",
+		"op://vault/item?file=",
 		"op://vault/item\x00/field",
 	} {
 		f.Add(seed)
@@ -180,6 +223,264 @@ func TestShouldReadNoteAndDeepConcealedFieldGivenValidReferences(t *testing.T) {
 		t.Fatalf("value=%q err=%v", values[fieldRef.Binding()].Reveal(), err)
 	}
 }
+
+func TestShouldReadConcealedFieldGivenAPICredentialItem(t *testing.T) {
+	fake := baseFake()
+	fake.item.Category = op.ItemCategoryAPICredentials
+	ref := provider.Reference{Region: "Production", Container: "service", Key: "path1/path2/FIELD"}
+
+	values, err := NewWithAPI(fake).ReadMany(context.Background(), []provider.Reference{ref})
+	if err != nil || values[ref.Binding()].Reveal() != "old" {
+		t.Fatalf("value=%q err=%v", values[ref.Binding()].Reveal(), err)
+	}
+}
+
+func TestShouldReadTextFieldGivenAPICredentialItem(t *testing.T) {
+	fake := baseFake()
+	fake.item.Category = op.ItemCategoryAPICredentials
+	ref := provider.Reference{Region: "Production", Container: "service", Key: "KEEP"}
+
+	values, err := NewWithAPI(fake).ReadMany(context.Background(), []provider.Reference{ref})
+	if err != nil || values[ref.Binding()].Reveal() != "untouched" {
+		t.Fatalf("value=%q err=%v", values[ref.Binding()].Reveal(), err)
+	}
+}
+
+func TestShouldReadNotesGivenNonSecureNoteItem(t *testing.T) {
+	fake := baseFake()
+	fake.item.Category = op.ItemCategoryAPICredentials
+	fake.item.Notes = "ITEM_NOTES"
+	ref := provider.Reference{Scheme: "op", Region: "Production", Container: "service", Key: "?notes"}
+
+	values, err := NewWithAPI(fake).ReadMany(context.Background(), []provider.Reference{ref})
+	defer provider.DestroyReadResults(values)
+	if err != nil || values[ref.Binding()].Reveal() != "ITEM_NOTES" {
+		t.Fatalf("value=%q err=%v", values[ref.Binding()].Reveal(), err)
+	}
+}
+
+func TestShouldReadDocumentAndAttachmentFromOneItemSnapshot(t *testing.T) {
+	fake := baseFake()
+	fake.item.Category = op.ItemCategoryDocument
+	fake.item.Document = &op.FileAttributes{ID: "document", Name: "config.env"}
+	fake.item.Files = []op.ItemFile{{
+		Attributes: op.FileAttributes{ID: "attachment", Name: "certificate.pem"},
+		SectionID:  "section",
+		FieldID:    "certificate",
+	}}
+	fake.fileContents = map[string][]byte{
+		"document":   []byte("DOCUMENT_VALUE"),
+		"attachment": []byte("ATTACHMENT_VALUE"),
+	}
+	document, err := Parse("op://Production/service?document")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachment, err := Parse("op://Production/service?file=path1/path2/certificate.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	values, err := NewWithAPI(fake).ReadMany(context.Background(), []provider.Reference{document, attachment})
+	defer provider.DestroyReadResults(values)
+	if err != nil || values[document.Binding()].Reveal() != "DOCUMENT_VALUE" || values[attachment.Binding()].Reveal() != "ATTACHMENT_VALUE" {
+		t.Fatalf("document=%q attachment=%q err=%v", values[document.Binding()].Reveal(), values[attachment.Binding()].Reveal(), err)
+	}
+	if fake.itemGets != 1 || len(fake.fileReads) != 2 {
+		t.Fatalf("item gets=%d file reads=%v", fake.itemGets, fake.fileReads)
+	}
+	for id, content := range fake.fileContents {
+		if !bytes.Equal(content, make([]byte, len(content))) {
+			t.Fatalf("%s content buffer was not destroyed", id)
+		}
+	}
+}
+
+func TestShouldResolveAttachmentByFieldIDFileIDOrFilename(t *testing.T) {
+	for _, selector := range []string{"certificate", "attachment", "certificate.pem"} {
+		t.Run(selector, func(t *testing.T) {
+			fake := baseFake()
+			fake.item.Files = []op.ItemFile{{
+				Attributes: op.FileAttributes{ID: "attachment", Name: "certificate.pem"},
+				FieldID:    "certificate",
+			}}
+			fake.fileContents = map[string][]byte{"attachment": []byte("ATTACHMENT_VALUE")}
+			ref := provider.Reference{Scheme: "op", Region: "Production", Container: "service", Key: fileSelectorPrefix + selector}
+
+			values, err := NewWithAPI(fake).ReadMany(context.Background(), []provider.Reference{ref})
+			defer provider.DestroyReadResults(values)
+			if err != nil || values[ref.Binding()].Reveal() != "ATTACHMENT_VALUE" {
+				t.Fatalf("value=%q err=%v", values[ref.Binding()].Reveal(), err)
+			}
+		})
+	}
+}
+
+func TestShouldRejectAndDestroyNonTextDocumentContent(t *testing.T) {
+	for name, content := range map[string][]byte{
+		"invalid UTF-8": {0xff},
+		"NUL":           {'a', 0, 'b'},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake := baseFake()
+			fake.item.Category = op.ItemCategoryDocument
+			fake.item.Document = &op.FileAttributes{ID: "document"}
+			fake.fileContents = map[string][]byte{"document": content}
+			ref := provider.Reference{Scheme: "op", Region: "Production", Container: "service", Key: "?document"}
+
+			_, err := NewWithAPI(fake).ReadMany(context.Background(), []provider.Reference{ref})
+			var typed *provider.Error
+			if !errors.As(err, &typed) || typed.Kind != provider.InvalidState {
+				t.Fatalf("err=%v", err)
+			}
+			if !bytes.Equal(content, make([]byte, len(content))) {
+				t.Fatal("rejected content buffer was not destroyed")
+			}
+		})
+	}
+}
+
+func TestShouldRedactFileReadFailure(t *testing.T) {
+	fake := baseFake()
+	fake.item.Category = op.ItemCategoryDocument
+	fake.item.Document = &op.FileAttributes{ID: "document"}
+	fake.fileErr = errors.New("remote leaked document detail")
+	ref := provider.Reference{Scheme: "op", Region: "Production", Container: "service", Key: "?document"}
+
+	_, err := NewWithAPI(fake).ReadMany(context.Background(), []provider.Reference{ref})
+	var typed *provider.Error
+	if !errors.As(err, &typed) || typed.Kind != provider.Indeterminate || strings.Contains(err.Error(), "leaked") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestShouldFailClosedGivenAmbiguousAttachment(t *testing.T) {
+	fake := baseFake()
+	fake.item.Files = []op.ItemFile{
+		{Attributes: op.FileAttributes{ID: "first", Name: "config.env"}, SectionID: "section", FieldID: "first-file"},
+		{Attributes: op.FileAttributes{ID: "second", Name: "config.env"}, SectionID: "section", FieldID: "second-file"},
+	}
+	ref := provider.Reference{Scheme: "op", Region: "Production", Container: "service", Key: "?file=path1/path2/config.env"}
+
+	_, err := NewWithAPI(fake).ReadMany(context.Background(), []provider.Reference{ref})
+	var typed *provider.Error
+	if !errors.As(err, &typed) || typed.Kind != provider.Ambiguous || len(fake.fileReads) != 0 {
+		t.Fatalf("file reads=%v err=%v", fake.fileReads, err)
+	}
+}
+
+func TestShouldReportMissingGivenUnknownAttachment(t *testing.T) {
+	fake := baseFake()
+	ref := provider.Reference{Scheme: "op", Region: "Production", Container: "service", Key: "?file=missing.txt"}
+
+	values, err := NewWithAPI(fake).ReadMany(context.Background(), []provider.Reference{ref})
+	defer provider.DestroyReadResults(values)
+	if err != nil || values[ref.Binding()].Found || len(fake.fileReads) != 0 {
+		t.Fatalf("result=%v file reads=%v err=%v", values[ref.Binding()].Found, fake.fileReads, err)
+	}
+}
+
+func TestShouldRejectDocumentSelectorGivenNonDocumentItem(t *testing.T) {
+	fake := baseFake()
+	ref := provider.Reference{Scheme: "op", Region: "Production", Container: "service", Key: "?document"}
+
+	_, err := NewWithAPI(fake).ReadMany(context.Background(), []provider.Reference{ref})
+	var typed *provider.Error
+	if !errors.As(err, &typed) || typed.Kind != provider.InvalidState || len(fake.fileReads) != 0 {
+		t.Fatalf("file reads=%v err=%v", fake.fileReads, err)
+	}
+}
+
+func TestShouldRejectSourceOnlyContentSelectorsAsDestinations(t *testing.T) {
+	for _, key := range []string{"?notes", "?document", "?file=certificate.pem"} {
+		fake := baseFake()
+		ref := provider.Reference{Scheme: "op", Region: "Production", Container: "service", Key: key}
+		adapter := NewWithAPI(fake)
+
+		_, readErr := adapter.ReadDestinations(context.Background(), []provider.Reference{ref})
+		_, writeErr := adapter.WriteMany(context.Background(), []provider.Write{{Environment: "VALUE", Reference: ref, Value: secret.New("replacement")}})
+		var readTyped, writeTyped *provider.Error
+		if !errors.As(readErr, &readTyped) || readTyped.Kind != provider.InvalidBinding || !errors.As(writeErr, &writeTyped) || writeTyped.Kind != provider.InvalidBinding {
+			t.Fatalf("key=%s readErr=%v writeErr=%v", key, readErr, writeErr)
+		}
+		if fake.itemGets != 0 || fake.puts != 0 {
+			t.Fatalf("key=%s item gets=%d puts=%d", key, fake.itemGets, fake.puts)
+		}
+	}
+}
+
+func TestShouldIgnorePlainFieldWhenReadingDestination(t *testing.T) {
+	fake := baseFake()
+	fake.item.Fields[1] = op.ItemField{
+		ID:        "MY_API_KEY",
+		Title:     "MY_API_KEY",
+		SectionID: stringPtr("section"),
+		FieldType: op.ItemFieldTypeText,
+		Value:     "same",
+	}
+	ref := provider.Reference{Region: "Production", Container: "service", Key: "path1/path2/MY_API_KEY"}
+	reader, ok := any(NewWithAPI(fake)).(interface {
+		ReadDestinations(context.Context, []provider.Reference) (map[string]provider.ReadResult, error)
+	})
+	if !ok {
+		t.Fatal("1Password adapter does not distinguish destination reads")
+	}
+
+	values, err := reader.ReadDestinations(context.Background(), []provider.Reference{ref})
+	defer provider.DestroyReadResults(values)
+	if err != nil || values[ref.Binding()].Found {
+		t.Fatalf("result=%v err=%v", values[ref.Binding()].Found, err)
+	}
+}
+
+func TestShouldReadConcealedDestinationWhenPlainFieldAlsoMatches(t *testing.T) {
+	fake := baseFake()
+	fake.item.Fields[1] = op.ItemField{
+		ID:        "MY_API_KEY",
+		Title:     "MY_API_KEY",
+		SectionID: stringPtr("section"),
+		FieldType: op.ItemFieldTypeText,
+		Value:     "plain",
+	}
+	fake.item.Fields = append(fake.item.Fields, op.ItemField{
+		ID:        "MY_API_KEY",
+		Title:     "MY_API_KEY",
+		SectionID: stringPtr("section"),
+		FieldType: op.ItemFieldTypeConcealed,
+		Value:     "concealed",
+	})
+	ref := provider.Reference{Region: "Production", Container: "service", Key: "path1/path2/MY_API_KEY"}
+
+	values, err := NewWithAPI(fake).ReadDestinations(context.Background(), []provider.Reference{ref})
+	defer provider.DestroyReadResults(values)
+	if err != nil || !values[ref.Binding()].Found || values[ref.Binding()].Reveal() != "concealed" {
+		t.Fatalf("found=%v value=%q err=%v", values[ref.Binding()].Found, values[ref.Binding()].Reveal(), err)
+	}
+}
+
+func TestShouldReadRootFieldGivenEmptySDKSectionID(t *testing.T) {
+	fake := baseFake()
+	fake.item.Fields[0].SectionID = stringPtr("")
+	ref := provider.Reference{Region: "Production", Container: "service", Key: "KEEP"}
+
+	values, err := NewWithAPI(fake).ReadMany(context.Background(), []provider.Reference{ref})
+	if err != nil || values[ref.Binding()].Reveal() != "untouched" {
+		t.Fatalf("value=%q err=%v", values[ref.Binding()].Reveal(), err)
+	}
+}
+
+func TestShouldRejectBodyReadGivenNonSecureNoteItem(t *testing.T) {
+	fake := baseFake()
+	fake.item.Category = op.ItemCategoryAPICredentials
+	ref := provider.Reference{Region: "Production", Container: "service"}
+
+	_, err := NewWithAPI(fake).ReadMany(context.Background(), []provider.Reference{ref})
+	var typed *provider.Error
+	if !errors.As(err, &typed) || typed.Kind != provider.InvalidState {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestShouldPreserveFieldsAndSectionsGivenGroupedWrites(t *testing.T) {
 	fake := baseFake()
 	a := NewWithAPI(fake)

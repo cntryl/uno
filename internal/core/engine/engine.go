@@ -289,7 +289,12 @@ func inspectDestinations(ctx context.Context, p *Plan, desired map[string]secret
 		for _, mapping := range group.mappings {
 			refs = append(refs, mapping.Destination)
 		}
-		got, err := adapter.ReadMany(ctx, refs)
+		var got map[string]provider.ReadResult
+		if reader, ok := adapter.(provider.DestinationReader); ok {
+			got, err = reader.ReadDestinations(ctx, refs)
+		} else {
+			got, err = adapter.ReadMany(ctx, refs)
+		}
 		if err != nil {
 			provider.DestroyReadResults(got)
 			results[i].err = safeOperationError("inspect", err)

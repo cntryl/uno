@@ -347,6 +347,39 @@ func destinationBinding(container, key string) string {
 	return provider.Reference{Scheme: "fake", Container: container, Key: key}.Binding()
 }
 
+type roleAwareAdapter struct {
+	diffAdapter
+
+	destinationReads int
+}
+
+func (a *roleAwareAdapter) ReadDestinations(_ context.Context, refs []provider.Reference) (map[string]provider.ReadResult, error) {
+	a.destinationReads++
+	return provider.MissingResults(refs), nil
+}
+
+func TestShouldUseDestinationReaderWhenSourceReadWouldMatchPlainDestination(t *testing.T) {
+	adapter := &roleAwareAdapter{diffAdapter: diffAdapter{values: map[string]string{
+		destinationBinding("s", "a"): "same",
+		destinationBinding("d", "a"): "same",
+	}}}
+	registry := provider.NewRegistry()
+	registry.Register("fake", fixedFactory{adapter: adapter})
+	p := &Plan{Registry: registry, Mappings: []Mapping{{
+		Environment: "A",
+		Source:      provider.Reference{Scheme: "fake", Container: "s", Key: "a"},
+		Destination: provider.Reference{Scheme: "fake", Container: "d", Key: "a"},
+	}}}
+
+	result, err := Sync(context.Background(), p, SyncOptions{})
+	if err != nil || len(result.Changes) != 1 || result.Changes[0].Kind != Create || fmt.Sprint(result.Completed) != "[A]" {
+		t.Fatalf("result=%v err=%v", result, err)
+	}
+	if adapter.destinationReads != 1 || len(adapter.writes) != 1 {
+		t.Fatalf("destination reads=%d writes=%v", adapter.destinationReads, adapter.writes)
+	}
+}
+
 func TestShouldReportUnchangedGivenDestinationAlreadyMatchesSource(t *testing.T) {
 	adapter := &diffAdapter{values: map[string]string{
 		destinationBinding("s", "a"): "one",
