@@ -55,12 +55,27 @@ func (e *Error) Error() string { return e.Message }
 func (e *Error) Unwrap() error { return e.Cause }
 
 func Bind(file *tpl.File, registry *provider.Registry) (*Plan, error) {
+	return bind(file, registry, true)
+}
+
+// BindSources validates and binds only source references for source-only
+// commands. Destination validation remains part of Bind for commands that use
+// destinations.
+func BindSources(file *tpl.File, registry *provider.Registry) (*Plan, error) {
+	return bind(file, registry, false)
+}
+
+func bind(file *tpl.File, registry *provider.Registry, bindDestinations bool) (*Plan, error) {
 	p := &Plan{Registry: registry}
 	destinations := make([]provider.Reference, 0, len(file.Entries))
 	for _, entry := range file.Entries {
 		source, err := registry.Parse(entry.Source)
 		if err != nil {
 			return nil, fmt.Errorf("line %d: invalid source reference: %s", entry.Line, provider.BindingDetail(err))
+		}
+		if !bindDestinations {
+			p.Mappings = append(p.Mappings, Mapping{Environment: entry.Key, Source: source})
+			continue
 		}
 		destination, err := registry.Parse(entry.Destination)
 		if err != nil {

@@ -59,7 +59,10 @@ Follow this sequence unless the user explicitly requests something else:
    | Revert destinations to their prior value | `npx uno rollback`                   | Yes (where supported)   | No                  |
 
 Only `sync` writes destination providers. Do not run it merely to validate a
-template. `uno` resolves every source before the first destination write.
+template. The source-only `dev` and `run` commands do not require variables
+used exclusively by destination references or destination aliases. `check`,
+`sync`, and `rollback` continue to expand and validate both sides. `uno`
+resolves every source before the first destination write.
 
 `sync` diffs each destination's current value against the resolved source
 before writing: a destination that already matches is skipped entirely (no

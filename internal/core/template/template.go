@@ -28,6 +28,17 @@ func terr(l, c int, m string) error { return &Error{l, c, m} }
 
 func Parse(input string) (*File, error) { return ParseEnv(input, os.LookupEnv) }
 func ParseEnv(input string, env func(string) (string, bool)) (*File, error) {
+	return parseEnv(input, env, true)
+}
+
+// ParseSourcesEnv validates the template structure and expands only source
+// references. Destination configuration is intentionally left unresolved for
+// commands that never inspect or write destinations.
+func ParseSourcesEnv(input string, env func(string) (string, bool)) (*File, error) {
+	return parseEnv(input, env, false)
+}
+
+func parseEnv(input string, env func(string) (string, bool), expandDestinations bool) (*File, error) {
 	if strings.ContainsRune(input, 0) {
 		return nil, terr(1, 1, "templates cannot contain NUL")
 	}
@@ -59,9 +70,13 @@ func ParseEnv(input string, env func(string) (string, bool)) (*File, error) {
 			if strings.HasPrefix(prefixRaw, "@") {
 				return nil, terr(i+1, eq+2, "destination aliases cannot reference aliases")
 			}
-			prefix, err := expand(prefixRaw, env)
-			if err != nil {
-				return nil, terr(i+1, eq+2, err.Error())
+			prefix := prefixRaw
+			if expandDestinations {
+				var err error
+				prefix, err = expand(prefixRaw, env)
+				if err != nil {
+					return nil, terr(i+1, eq+2, err.Error())
+				}
 			}
 			if strings.HasPrefix(prefix, "@") {
 				return nil, terr(i+1, eq+2, "destination aliases cannot reference aliases")
@@ -96,7 +111,8 @@ func ParseEnv(input string, env func(string) (string, bool)) (*File, error) {
 			return nil, terr(i+1, eq+2, err.Error())
 		}
 		var destination string
-		if strings.HasPrefix(destinationRaw, "@") {
+		switch {
+		case strings.HasPrefix(destinationRaw, "@"):
 			if !validAlias(destinationRaw) {
 				return nil, terr(i+1, eq+arrow+4, "destination alias must be the entire destination")
 			}
@@ -106,11 +122,13 @@ func ParseEnv(input string, env func(string) (string, bool)) (*File, error) {
 			}
 			alias.used = true
 			destination = alias.prefix + "/" + key
-		} else {
+		case expandDestinations:
 			destination, err = expand(destinationRaw, env)
 			if err != nil {
 				return nil, terr(i+1, eq+arrow+4, err.Error())
 			}
+		default:
+			destination = destinationRaw
 		}
 		f.Entries = append(f.Entries, Entry{key, source, destination, i + 1})
 	}

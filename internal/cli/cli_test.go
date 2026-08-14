@@ -602,6 +602,47 @@ func TestShouldWriteEscapedSecretsFileWithRestrictedPermissionsGivenDevCommand(t
 	}
 }
 
+func TestShouldIgnoreUnsetDestinationAliasEnvironmentGivenDevCommand(t *testing.T) {
+	adapter := &cliAdapter{}
+	providers := provider.NewRegistry()
+	providers.Register("fake", aliasCliFactory{adapter})
+	temporary := t.TempDir()
+	t.Chdir(temporary)
+	if err := exec.CommandContext(t.Context(), "git", "init", "-q").Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(".gitignore", []byte(".env.secrets*\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(temporary, "template")
+	input := "@runtime=fake://$DESTINATION_CONTAINER\nVALUE=fake://source/VALUE -> @runtime\n"
+	if err := os.WriteFile(path, []byte(input), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	runtime := Runtime{
+		Stdout:    &out,
+		Stdin:     strings.NewReader(""),
+		LookupEnv: func(string) (string, bool) { return "", false },
+	}
+	if _, err := Execute(t.Context(), []string{"--template", path, "check"}, providers, runtime); err == nil || !strings.Contains(err.Error(), "environment variable DESTINATION_CONTAINER is not set") {
+		t.Fatalf("check err=%v", err)
+	}
+	if _, err := Execute(t.Context(), []string{"--template", path, "dev"}, providers, runtime); err != nil {
+		t.Fatal(err)
+	}
+	if adapter.reads != 1 || adapter.writes != 0 {
+		t.Fatalf("reads=%d writes=%d", adapter.reads, adapter.writes)
+	}
+	data, err := os.ReadFile(".env.secrets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), "VALUE=\"resolved\"\n"; got != want {
+		t.Fatalf("contents=%q want=%q", got, want)
+	}
+}
+
 func TestShouldFailBeforeProviderAccessGivenMissingGitignoreOnDevCommand(t *testing.T) {
 	adapter := &cliAdapter{}
 	providers := cliRegistry(adapter)

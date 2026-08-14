@@ -211,7 +211,7 @@ func Execute(ctx context.Context, args []string, providers *provider.Registry, r
 		if fs.NArg() != 0 {
 			return 0, fmt.Errorf("dev does not accept arguments")
 		}
-		plan, err := a.load()
+		plan, err := a.loadSources()
 		if err != nil {
 			return 0, err
 		}
@@ -238,7 +238,7 @@ func Execute(ctx context.Context, args []string, providers *provider.Registry, r
 		return 0, nil
 	case "run":
 		commandArgs = commandArgs[1:]
-		plan, err := a.load()
+		plan, err := a.loadSources()
 		if err != nil {
 			return 0, err
 		}
@@ -316,6 +316,17 @@ func Execute(ctx context.Context, args []string, providers *provider.Registry, r
 }
 
 func (a *app) load() (*engine.Plan, error) {
+	return a.loadWith(tpl.ParseEnv, engine.Bind)
+}
+
+func (a *app) loadSources() (*engine.Plan, error) {
+	return a.loadWith(tpl.ParseSourcesEnv, engine.BindSources)
+}
+
+func (a *app) loadWith(
+	parse func(string, func(string) (string, bool)) (*tpl.File, error),
+	bind func(*tpl.File, *provider.Registry) (*engine.Plan, error),
+) (*engine.Plan, error) {
 	path := a.templatePath
 	if path == "" {
 		path, _ = a.runtime.LookupEnv("UNO_TEMPLATE")
@@ -327,11 +338,11 @@ func (a *app) load() (*engine.Plan, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not read secrets template")
 	}
-	file, err := tpl.ParseEnv(string(data), a.runtime.LookupEnv)
+	file, err := parse(string(data), a.runtime.LookupEnv)
 	if err != nil {
 		return nil, fmt.Errorf("template error: %w", err)
 	}
-	plan, err := engine.Bind(file, a.registry)
+	plan, err := bind(file, a.registry)
 	if err != nil {
 		return nil, fmt.Errorf("template error: %w", err)
 	}
