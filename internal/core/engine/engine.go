@@ -147,31 +147,13 @@ func resolveGroup(ctx context.Context, adapters *adapterCache, group sourceGroup
 	if err != nil {
 		return nil, safeOperationError("read", err)
 	}
-	refs := make([]provider.Reference, 0, len(group.mappings))
-	seen := make(map[string]bool)
-	for _, mapping := range group.mappings {
-		if binding := mapping.Source.Binding(); !seen[binding] {
-			seen[binding] = true
-			refs = append(refs, mapping.Source)
-		}
-	}
+	refs, seen := sourceReferences(group.mappings)
 	got, err := adapter.ReadMany(ctx, refs)
 	if err != nil {
 		provider.DestroyReadResults(got)
 		return nil, safeOperationError("read", err)
 	}
-	valid := len(got) == len(refs)
-	for _, ref := range refs {
-		if _, ok := got[ref.Binding()]; !ok {
-			valid = false
-		}
-	}
-	for key := range got {
-		if !seen[key] {
-			valid = false
-		}
-	}
-	if !valid {
+	if !validReadResults(got, refs, seen) {
 		provider.DestroyReadResults(got)
 		return nil, safeOperationError("read", &provider.Error{Kind: provider.InvalidState})
 	}
@@ -187,6 +169,34 @@ func resolveGroup(ctx context.Context, adapters *adapterCache, group sourceGroup
 	resultValues := values
 	values = nil
 	return resultValues, nil
+}
+func sourceReferences(mappings []Mapping) ([]provider.Reference, map[string]bool) {
+	refs := make([]provider.Reference, 0, len(mappings))
+	seen := map[string]bool{}
+	for _, mapping := range mappings {
+		binding := mapping.Source.Binding()
+		if !seen[binding] {
+			seen[binding] = true
+			refs = append(refs, mapping.Source)
+		}
+	}
+	return refs, seen
+}
+func validReadResults(got map[string]provider.ReadResult, refs []provider.Reference, seen map[string]bool) bool {
+	if len(got) != len(refs) {
+		return false
+	}
+	for _, ref := range refs {
+		if _, ok := got[ref.Binding()]; !ok {
+			return false
+		}
+	}
+	for key := range got {
+		if !seen[key] {
+			return false
+		}
+	}
+	return true
 }
 
 func writeDestinations(ctx context.Context, p *Plan, values map[string]secret.Value, adapters *adapterCache) (Receipt, error) {
@@ -248,35 +258,50 @@ func Sync(ctx context.Context, p *Plan, options SyncOptions) (SyncResult, error)
 	if err != nil {
 		return result, err
 	}
-	pending := make(map[string]bool)
-	var actionable []Change
+	pending, actionable := actionableChanges(changes)
+	if options.DryRun || len(actionable) == 0 {
+		return result, nil
+	}
+	if err := confirmChanges(options.Confirm, actionable); err != nil {
+		return result, err
+	}
+	filtered := filterPlan(p, pending)
+	receipt, err := writeDestinations(ctx, filtered, values, adapters)
+	result.Completed = receiptCompleted(receipt, err)
+	return result, err
+}
+func actionableChanges(changes []Change) (map[string]bool, []Change) {
+	pending := map[string]bool{}
+	actionable := []Change{}
 	for _, change := range changes {
 		if change.Kind != Unchanged {
 			pending[change.Environment] = true
 			actionable = append(actionable, change)
 		}
 	}
-	if options.DryRun || len(actionable) == 0 {
-		return result, nil
+	return pending, actionable
+}
+func confirmChanges(confirm func([]Change) (bool, error), changes []Change) error {
+	if confirm == nil {
+		return nil
 	}
-	if options.Confirm != nil {
-		ok, confirmErr := options.Confirm(actionable)
-		if confirmErr != nil {
-			return result, confirmErr
-		}
-		if !ok {
-			return result, &Error{Message: "sync aborted: not confirmed"}
-		}
+	ok, err := confirm(changes)
+	if err != nil {
+		return err
 	}
+	if !ok {
+		return &Error{Message: "sync aborted: not confirmed"}
+	}
+	return nil
+}
+func filterPlan(p *Plan, pending map[string]bool) *Plan {
 	filtered := &Plan{Registry: p.Registry}
 	for _, mapping := range p.Mappings {
 		if pending[mapping.Environment] {
 			filtered.Mappings = append(filtered.Mappings, mapping)
 		}
 	}
-	receipt, err := writeDestinations(ctx, filtered, values, adapters)
-	result.Completed = receiptCompleted(receipt, err)
-	return result, err
+	return filtered
 }
 
 func receiptCompleted(receipt Receipt, err error) []string {
@@ -284,67 +309,6 @@ func receiptCompleted(receipt Receipt, err error) []string {
 		return workflow.Completed
 	}
 	return receipt.Completed
-}
-
-func inspectDestinations(ctx context.Context, p *Plan, desired map[string]secret.Value, adapters *adapterCache) ([]Change, error) {
-	groups := groupDestinationContainers(p.Mappings)
-	type groupResult struct {
-		changes []Change
-		err     error
-	}
-	results := make([]groupResult, len(groups))
-	runLimited(len(groups), func(i int) {
-		group := groups[i]
-		adapter, err := adapters.get(ctx, group.reference)
-		if err != nil {
-			results[i].err = safeOperationError("inspect", err)
-			return
-		}
-		refs := make([]provider.Reference, 0, len(group.mappings))
-		for _, mapping := range group.mappings {
-			refs = append(refs, mapping.Destination)
-		}
-		var got map[string]provider.ReadResult
-		if reader, ok := adapter.(provider.DestinationReader); ok {
-			got, err = reader.ReadDestinations(ctx, refs)
-		} else {
-			got, err = adapter.ReadMany(ctx, refs)
-		}
-		if err != nil {
-			provider.DestroyReadResults(got)
-			results[i].err = safeOperationError("inspect", err)
-			return
-		}
-		defer provider.DestroyReadResults(got)
-		if len(got) != len(refs) {
-			results[i].err = safeOperationError("inspect", &provider.Error{Kind: provider.InvalidState})
-			return
-		}
-		for _, mapping := range group.mappings {
-			current, ok := got[mapping.Destination.Binding()]
-			if !ok {
-				results[i].err = safeOperationError("inspect", &provider.Error{Kind: provider.InvalidState})
-				return
-			}
-			kind := Create
-			if current.Found {
-				kind = Update
-				if current.Value.Reveal() == desired[mapping.Environment].Reveal() {
-					kind = Unchanged
-				}
-			}
-			results[i].changes = append(results[i].changes, Change{Environment: mapping.Environment, Kind: kind})
-		}
-	})
-	changes := make([]Change, 0, len(p.Mappings))
-	for _, result := range results {
-		if result.err != nil {
-			return changes, result.err
-		}
-		changes = append(changes, result.changes...)
-	}
-	sort.Slice(changes, func(i, j int) bool { return changes[i].Environment < changes[j].Environment })
-	return changes, nil
 }
 
 // ChangeKind classifies how a mapping's destination compares to its

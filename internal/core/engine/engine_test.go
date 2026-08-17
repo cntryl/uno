@@ -353,6 +353,63 @@ type roleAwareAdapter struct {
 	destinationReads int
 }
 
+type invalidDestinationResultsAdapter struct {
+	diffAdapter
+
+	returnUnexpected bool
+	returnedValue    secret.Value
+}
+
+func (a *invalidDestinationResultsAdapter) ReadDestinations(_ context.Context, _ []provider.Reference) (map[string]provider.ReadResult, error) {
+	if !a.returnUnexpected {
+		return map[string]provider.ReadResult{}, nil
+	}
+	a.returnedValue = secret.New("must be destroyed")
+	return map[string]provider.ReadResult{
+		"unexpected": {Value: a.returnedValue, Found: true},
+	}, nil
+}
+
+func TestShouldFailClosedAndDestroyResultsGivenInvalidDestinationBindings(t *testing.T) {
+	for _, testCase := range []struct {
+		name             string
+		returnUnexpected bool
+	}{
+		{name: "missing"},
+		{name: "unexpected", returnUnexpected: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			adapter := &invalidDestinationResultsAdapter{
+				diffAdapter:      diffAdapter{values: map[string]string{destinationBinding("s", "a"): "new"}},
+				returnUnexpected: testCase.returnUnexpected,
+			}
+			registry := provider.NewRegistry()
+			registry.Register("fake", fixedFactory{adapter: adapter})
+			plan := &Plan{Registry: registry, Mappings: []Mapping{{
+				Environment: "A",
+				Source:      provider.Reference{Scheme: "fake", Container: "s", Key: "a"},
+				Destination: provider.Reference{Scheme: "fake", Container: "d", Key: "a"},
+			}}}
+			confirmed := false
+
+			result, err := Sync(context.Background(), plan, SyncOptions{Confirm: func([]Change) (bool, error) {
+				confirmed = true
+				return true, nil
+			}})
+
+			if err == nil || !stringsContains(err.Error(), "InvalidState") || stringsContains(err.Error(), "unexpected") {
+				t.Fatalf("result=%v err=%v", result, err)
+			}
+			if confirmed || len(adapter.writes) != 0 {
+				t.Fatalf("confirmed=%v writes=%v", confirmed, adapter.writes)
+			}
+			if testCase.returnUnexpected && adapter.returnedValue.Reveal() != "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" {
+				t.Fatalf("destination result was not destroyed: %q", adapter.returnedValue.Reveal())
+			}
+		})
+	}
+}
+
 func (a *roleAwareAdapter) ReadDestinations(_ context.Context, refs []provider.Reference) (map[string]provider.ReadResult, error) {
 	a.destinationReads++
 	return provider.MissingResults(refs), nil

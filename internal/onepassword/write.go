@@ -27,32 +27,36 @@ func (a *Adapter) WriteMany(ctx context.Context, writes []provider.Write) (provi
 	}
 	provider.SortedWrites(writes)
 	for attempt := 0; attempt <= conflictRetries; attempt++ {
-		item, err := a.load(ctx, writes[0].Reference)
-		if err != nil {
-			return provider.Receipt{}, err
-		}
-		if err := validateDestination(item); err != nil {
-			return provider.Receipt{}, err
-		}
-		if err := applyWrites(item, writes); err != nil {
-			return provider.Receipt{}, err
-		}
-		if _, err := a.mutation.PutItem(ctx, *item); err == nil {
+		err := a.writeAttempt(ctx, writes)
+		if err == nil {
 			return provider.Receipt{Completed: provider.Environments(writes)}, nil
-		} else {
-			var conflict versionConflict
-			if !errors.As(err, &conflict) || !conflict.VersionConflict() {
-				return provider.Receipt{}, remote(err)
-			}
-			if attempt == conflictRetries {
-				return provider.Receipt{}, remote(err)
-			}
-			if err := a.waitBeforeRetry(ctx, attempt); err != nil {
-				return provider.Receipt{}, err
-			}
+		}
+		if !isVersionConflict(err) || attempt == conflictRetries {
+			return provider.Receipt{}, remote(err)
+		}
+		if err := a.waitBeforeRetry(ctx, attempt); err != nil {
+			return provider.Receipt{}, err
 		}
 	}
 	return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
+}
+func (a *Adapter) writeAttempt(ctx context.Context, writes []provider.Write) error {
+	item, err := a.load(ctx, writes[0].Reference)
+	if err != nil {
+		return err
+	}
+	if err := validateDestination(item); err != nil {
+		return err
+	}
+	if err := applyWrites(item, writes); err != nil {
+		return err
+	}
+	_, err = a.mutation.PutItem(ctx, *item)
+	return err
+}
+func isVersionConflict(err error) bool {
+	var conflict versionConflict
+	return errors.As(err, &conflict) && conflict.VersionConflict()
 }
 
 func validateDestination(item *op.Item) error {

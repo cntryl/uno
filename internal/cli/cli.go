@@ -16,10 +16,7 @@ import (
 
 	"github.com/cntryl/uno/internal/core/engine"
 	"github.com/cntryl/uno/internal/core/provider"
-	"github.com/cntryl/uno/internal/core/secret"
 	tpl "github.com/cntryl/uno/internal/core/template"
-	"github.com/cntryl/uno/internal/devguard"
-	"github.com/cntryl/uno/internal/dotenv"
 	buildversion "github.com/cntryl/uno/internal/version"
 )
 
@@ -91,19 +88,7 @@ func ExecuteWithRegistry(ctx context.Context, args []string, providers *provider
 
 // Execute runs one command with injected process boundaries.
 func Execute(ctx context.Context, args []string, providers *provider.Registry, runtime Runtime) (code int, err error) { //nolint:nonamedreturns
-	defer func() {
-		if err == nil {
-			return
-		}
-		code = 1
-		message := err.Error()
-		for _, marker := range []string{"invalid arguments:", "unknown command ", "a command is required", " does not accept ", "run requires a command"} {
-			if strings.Contains(message, marker) {
-				code = 2
-				return
-			}
-		}
-	}()
+	defer func() { code = classifyExit(code, err) }()
 	a := &app{registry: providers, runtime: runtime.withDefaults()}
 	global := flag.NewFlagSet("uno", flag.ContinueOnError)
 	global.SetOutput(io.Discard)
@@ -118,28 +103,14 @@ func Execute(ctx context.Context, args []string, providers *provider.Registry, r
 		return 0, err
 	}
 	if !invocation.commandFound {
-		if err := global.Parse(invocation.globals); err != nil {
-			return 0, cleanFlagError(err)
-		}
-		if showVersion {
-			_, _ = fmt.Fprintf(a.runtime.Stdout, "uno %s\n", version)
-			return 0, nil
-		}
-		if help || len(args) == 0 {
-			printHelp(a.runtime.Stdout)
-			return 0, nil
-		}
-		return 0, fmt.Errorf("a command is required")
+		return 0, handleNoCommand(a, global, invocation, len(args), &help, &showVersion)
 	}
 	command, commandArgs := invocation.command, invocation.commandArgs
 	if err := global.Parse(invocation.globals); err != nil {
 		return 0, cleanFlagError(err)
 	}
-	if a.timeout <= 0 {
-		return 0, fmt.Errorf("invalid arguments: timeout must be greater than zero")
-	}
-	if command != "check" && command != "sync" && command != "dev" && command != "run" && command != "rollback" {
-		return 0, fmt.Errorf("unknown command %q", command)
+	if err := validateCommand(command, a.timeout); err != nil {
+		return 0, err
 	}
 	// For "run", --help/--version short-circuit unless there's a leftover
 	// positional argument suggesting the user forgot the "--" separator
@@ -147,8 +118,7 @@ func Execute(ctx context.Context, args []string, providers *provider.Registry, r
 	// A flag given before the command name (helpBeforeCommand/
 	// versionBeforeCommand) is always an explicit, unambiguous request and
 	// wins regardless of what follows.
-	if (help || showVersion) && (command != "run" || invocation.runHasSeparator || len(commandArgs) == 0 ||
-		invocation.helpBeforeCommand || invocation.versionBeforeCommand) {
+	if shouldShortCircuit(invocation, help, showVersion) {
 		if showVersion {
 			_, _ = fmt.Fprintf(a.runtime.Stdout, "uno %s\n", version)
 		} else {
@@ -156,164 +126,73 @@ func Execute(ctx context.Context, args []string, providers *provider.Registry, r
 		}
 		return 0, nil
 	}
-	if command == "run" && (!invocation.runHasSeparator || len(commandArgs) < 2 || commandArgs[0] != "--") {
-		return 0, fmt.Errorf("run requires a command after --")
+	if err := validateRunInvocation(invocation); err != nil {
+		return 0, err
+	}
+	return a.dispatch(ctx, command, commandArgs)
+}
+func validateRunInvocation(in invocation) error {
+	if in.command != "run" {
+		return nil
+	}
+	if !in.runHasSeparator || len(in.commandArgs) < 2 || in.commandArgs[0] != "--" {
+		return fmt.Errorf("run requires a command after --")
+	}
+	return nil
+}
+
+func validateCommand(command string, timeout time.Duration) error {
+	if timeout <= 0 {
+		return fmt.Errorf("invalid arguments: timeout must be greater than zero")
 	}
 	switch command {
+	case "check", "sync", "dev", "run", "rollback":
+		return nil
+	default:
+		return fmt.Errorf("unknown command %q", command)
+	}
+}
+func shouldShortCircuit(in invocation, help, version bool) bool {
+	return (help || version) && (in.command != "run" || in.runHasSeparator || len(in.commandArgs) == 0 || in.helpBeforeCommand || in.versionBeforeCommand)
+}
+
+func classifyExit(code int, err error) int {
+	if err == nil {
+		return code
+	}
+	for _, marker := range []string{"invalid arguments:", "unknown command ", "a command is required", " does not accept ", "run requires a command"} {
+		if strings.Contains(err.Error(), marker) {
+			return 2
+		}
+	}
+	return 1
+}
+func handleNoCommand(a *app, global *flag.FlagSet, in invocation, argCount int, help, showVersion *bool) error {
+	if err := global.Parse(in.globals); err != nil {
+		return cleanFlagError(err)
+	}
+	if *showVersion {
+		_, _ = fmt.Fprintf(a.runtime.Stdout, "uno %s\n", version)
+		return nil
+	}
+	if *help || argCount == 0 {
+		printHelp(a.runtime.Stdout)
+		return nil
+	}
+	return fmt.Errorf("a command is required")
+}
+func (a *app) dispatch(ctx context.Context, command string, args []string) (int, error) {
+	switch command {
 	case "check":
-		fs := flag.NewFlagSet("check", flag.ContinueOnError)
-		fs.SetOutput(io.Discard)
-		if err := fs.Parse(commandArgs); err != nil {
-			return 0, cleanFlagError(err)
-		}
-		if fs.NArg() != 0 {
-			return 0, fmt.Errorf("check does not accept arguments")
-		}
-		plan, err := a.load()
-		if err != nil {
-			return 0, err
-		}
-		_, _ = fmt.Fprintf(a.runtime.Stdout, "template valid: %d mappings\n", len(plan.Mappings))
-		return 0, nil
+		return a.check(args)
 	case "sync":
-		fs := flag.NewFlagSet("sync", flag.ContinueOnError)
-		fs.SetOutput(io.Discard)
-		dry := fs.Bool("dry-run", false, "resolve and inspect without confirming or writing")
-		force := fs.Bool("force", false, "write pending changes without an interactive confirmation")
-		jsonOut := fs.Bool("json", false, "print machine-readable JSON output")
-		if err := fs.Parse(commandArgs); err != nil {
-			return 0, cleanFlagError(err)
-		}
-		if fs.NArg() != 0 {
-			return 0, fmt.Errorf("sync does not accept positional arguments")
-		}
-		plan, err := a.load()
-		if err != nil {
-			return 0, err
-		}
-		opCtx, cancel := context.WithTimeout(ctx, a.timeout)
-		defer cancel()
-		result, err := engine.Sync(opCtx, plan, engine.SyncOptions{DryRun: *dry, Confirm: confirmSync(a.runtime, *force)})
-		if *jsonOut {
-			if jsonErr := printSyncResultJSON(a.runtime.Stdout, result, err); jsonErr != nil && err == nil {
-				err = jsonErr
-			}
-		} else {
-			printSyncResult(a.runtime.Stdout, result, err)
-		}
-		return 0, wrapTimeout(opCtx, err)
+		return a.sync(ctx, args)
 	case "dev":
-		fs := flag.NewFlagSet("dev", flag.ContinueOnError)
-		fs.SetOutput(io.Discard)
-		if err := fs.Parse(commandArgs); err != nil {
-			return 0, cleanFlagError(err)
-		}
-		if fs.NArg() != 0 {
-			return 0, fmt.Errorf("dev does not accept arguments")
-		}
-		plan, err := a.loadSources()
-		if err != nil {
-			return 0, err
-		}
-		if len(plan.Mappings) == 0 {
-			_, _ = fmt.Fprintln(a.runtime.Stdout, "no mappings; left .env.secrets unchanged")
-			return 0, nil
-		}
-		opCtx, cancel := context.WithTimeout(ctx, a.timeout)
-		defer cancel()
-		if err := devguard.Check(opCtx, "."); err != nil {
-			return 0, wrapTimeout(opCtx, err)
-		}
-		values, err := engine.Resolve(opCtx, plan)
-		if err != nil {
-			return 0, wrapTimeout(opCtx, err)
-		}
-		defer secret.DestroyMap(values)
-		if err := devguard.Check(opCtx, "."); err != nil {
-			return 0, wrapTimeout(opCtx, err)
-		}
-		if err := dotenv.Write(".env.secrets", values); err != nil {
-			return 0, wrapTimeout(opCtx, err)
-		}
-		if err := wrapTimeout(opCtx, nil); err != nil {
-			return 0, err
-		}
-		_, _ = fmt.Fprintf(a.runtime.Stdout, "wrote .env.secrets with %d secrets\n", len(values))
-		return 0, nil
+		return a.dev(ctx, args)
 	case "run":
-		commandArgs = commandArgs[1:]
-		plan, err := a.loadSources()
-		if err != nil {
-			return 0, err
-		}
-		opCtx, cancel := context.WithTimeout(ctx, a.timeout)
-		values, err := engine.Resolve(opCtx, plan)
-		cancel()
-		if err != nil {
-			return 0, wrapTimeout(opCtx, err)
-		}
-		defer secret.DestroyMap(values)
-		cmd := a.runtime.Command(ctx, commandArgs[0], commandArgs[1:]...)
-		cmd.Stdin, cmd.Stdout, cmd.Stderr = a.runtime.Stdin, a.runtime.Stdout, a.runtime.Stderr
-		keys := secret.SortedKeys(values)
-		cmd.Env = SafeChildEnvironment(a.runtime.Environ(), a.registry.CapabilityPrefixes(), keys)
-		for _, key := range keys {
-			cmd.Env = append(cmd.Env, key+"="+values[key].Reveal())
-		}
-		if err := cmd.Run(); err != nil {
-			var exit *exec.ExitError
-			if errors.As(err, &exit) {
-				if code, ok := signalExitCode(exit.ProcessState); ok {
-					return code, nil
-				}
-				return exit.ExitCode(), nil
-			}
-			return 0, fmt.Errorf("could not start child command")
-		}
-		return 0, nil
+		return a.run(ctx, args[1:])
 	case "rollback":
-		fs := flag.NewFlagSet("rollback", flag.ContinueOnError)
-		fs.SetOutput(io.Discard)
-		force := fs.Bool("force", false, "roll back without an interactive confirmation")
-		jsonOut := fs.Bool("json", false, "print machine-readable JSON output")
-		if err := fs.Parse(commandArgs); err != nil {
-			return 0, cleanFlagError(err)
-		}
-		if fs.NArg() != 0 {
-			return 0, fmt.Errorf("rollback does not accept positional arguments")
-		}
-		plan, err := a.load()
-		if err != nil {
-			return 0, err
-		}
-		if !*force {
-			ok, err := confirmAction(a.runtime, "rollback", fmt.Sprintf("This will roll back %d mapping(s) to their previous provider-side value.", len(plan.Mappings)))
-			if err != nil {
-				return 0, err
-			}
-			if !ok {
-				return 0, fmt.Errorf("rollback aborted: not confirmed")
-			}
-		}
-		opCtx, cancel := context.WithTimeout(ctx, a.timeout)
-		defer cancel()
-		results, err := engine.Rollback(opCtx, plan)
-		if err == nil {
-			if *jsonOut {
-				err = printRollbackResultJSON(a.runtime.Stdout, results)
-			} else {
-				printRollbackResult(a.runtime.Stdout, results)
-			}
-			if err == nil {
-				for _, result := range results {
-					if result.Status == engine.Failed || result.Status == engine.Unsupported {
-						err = fmt.Errorf("rollback incomplete")
-						break
-					}
-				}
-			}
-		}
-		return 0, wrapTimeout(opCtx, err)
+		return a.rollback(ctx, args)
 	default:
 		return 0, fmt.Errorf("unknown command %q", command)
 	}
@@ -370,59 +249,85 @@ type invocation struct {
 func parseInvocation(args []string, flags *flag.FlagSet) (invocation, error) {
 	var parsed invocation
 	globalOptionsEnded := false
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
+	for i := 0; i < len(args); {
 		if !parsed.commandFound {
-			if !globalOptionsEnded && arg == "--" {
-				globalOptionsEnded = true
-				continue
+			_, ended, err := parseBeforeCommand(&parsed, args, &i, flags, globalOptionsEnded)
+			if err != nil {
+				return invocation{}, err
 			}
-			if !globalOptionsEnded {
-				if values, ok := globalFlagValues(flags, arg); ok {
-					parsed.globals = append(parsed.globals, arg)
-					switch flagName(arg) {
-					case "help", "h":
-						parsed.helpBeforeCommand = true
-					case "version":
-						parsed.versionBeforeCommand = true
-					}
-					if values == 1 {
-						if i+1 >= len(args) {
-							return invocation{}, parseFlagError(flags, arg)
-						}
-						i++
-						parsed.globals = append(parsed.globals, args[i])
-					}
-					continue
-				}
-				if strings.HasPrefix(arg, "-") {
-					return invocation{}, parseFlagError(flags, arg)
-				}
-			}
-			parsed.command = arg
-			parsed.commandFound = true
+			globalOptionsEnded = ended
+			i++
 			continue
 		}
-
-		if arg == "--" {
-			parsed.commandArgs = append(parsed.commandArgs, args[i:]...)
-			parsed.runHasSeparator = parsed.command == "run"
+		done, err := parseAfterCommand(&parsed, args, &i, flags)
+		if err != nil {
+			return invocation{}, err
+		}
+		if done {
 			return parsed, nil
 		}
-		if values, ok := globalFlagValues(flags, arg); ok {
-			parsed.globals = append(parsed.globals, arg)
-			if values == 1 {
-				if i+1 >= len(args) {
-					return invocation{}, parseFlagError(flags, arg)
-				}
-				i++
-				parsed.globals = append(parsed.globals, args[i])
-			}
-			continue
-		}
-		parsed.commandArgs = append(parsed.commandArgs, arg)
+		i++
 	}
 	return parsed, nil
+}
+
+func parseBeforeCommand(parsed *invocation, args []string, index *int, flags *flag.FlagSet, ended bool) (bool, bool, error) {
+	arg := args[*index]
+	if !ended && arg == "--" {
+		return true, true, nil
+	}
+	if !ended && strings.HasPrefix(arg, "-") {
+		return parsePreCommandFlag(parsed, args, index, flags, ended, arg)
+	}
+	parsed.command = arg
+	parsed.commandFound = true
+	return true, ended, nil
+}
+func parsePreCommandFlag(parsed *invocation, args []string, index *int, flags *flag.FlagSet, ended bool, arg string) (bool, bool, error) {
+	values, ok := globalFlagValues(flags, arg)
+	if !ok {
+		return false, ended, parseFlagError(flags, arg)
+	}
+	parsed.globals = append(parsed.globals, arg)
+	markPreCommandFlag(parsed, arg)
+	if values == 0 {
+		return true, ended, nil
+	}
+	if *index+1 >= len(args) {
+		return false, ended, parseFlagError(flags, arg)
+	}
+	*index++
+	parsed.globals = append(parsed.globals, args[*index])
+	return true, ended, nil
+}
+func markPreCommandFlag(parsed *invocation, arg string) {
+	switch flagName(arg) {
+	case "help", "h":
+		parsed.helpBeforeCommand = true
+	case "version":
+		parsed.versionBeforeCommand = true
+	}
+}
+func parseAfterCommand(parsed *invocation, args []string, index *int, flags *flag.FlagSet) (bool, error) {
+	arg := args[*index]
+	if arg == "--" {
+		parsed.commandArgs = append(parsed.commandArgs, args[*index:]...)
+		parsed.runHasSeparator = parsed.command == "run"
+		return true, nil
+	}
+	if values, ok := globalFlagValues(flags, arg); ok {
+		parsed.globals = append(parsed.globals, arg)
+		if values == 1 {
+			if *index+1 >= len(args) {
+				return false, parseFlagError(flags, arg)
+			}
+			*index++
+			parsed.globals = append(parsed.globals, args[*index])
+		}
+		return false, nil
+	}
+	parsed.commandArgs = append(parsed.commandArgs, arg)
+	return false, nil
 }
 
 func flagName(arg string) string {

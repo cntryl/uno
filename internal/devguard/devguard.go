@@ -20,12 +20,8 @@ func Check(ctx context.Context, directory string) error {
 	if err != nil {
 		return fmt.Errorf("dev requires git on PATH")
 	}
-	info, err := os.Lstat(filepath.Join(directory, secretsFile))
-	if err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("dev refuses a symlink at .env.secrets")
-	}
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("could not inspect .env.secrets")
+	if err := inspectSecretsFile(directory); err != nil {
+		return err
 	}
 	if !gitIgnored(ctx, git, directory, secretsFile) || !gitIgnored(ctx, git, directory, secretsFile+"-probe") {
 		return fmt.Errorf("dev requires .env.secrets and .env.secrets-* to be effectively ignored by Git")
@@ -35,11 +31,24 @@ func Check(ctx context.Context, directory string) error {
 	if tracked.Run() == nil {
 		return fmt.Errorf("dev refuses a tracked .env.secrets")
 	}
-	ignoreFiles, err := dockerIgnoreFiles(directory)
+	return checkDockerIgnores(directory)
+}
+func inspectSecretsFile(directory string) error {
+	info, err := os.Lstat(filepath.Join(directory, secretsFile))
+	if err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("dev refuses a symlink at .env.secrets")
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("could not inspect .env.secrets")
+	}
+	return nil
+}
+func checkDockerIgnores(directory string) error {
+	files, err := dockerIgnoreFiles(directory)
 	if err != nil {
 		return fmt.Errorf("could not inspect development directory")
 	}
-	for _, path := range ignoreFiles {
+	for _, path := range files {
 		if !finalRuleIgnores(path, secretsFile) || !finalRuleIgnores(path, secretsFile+"-probe") {
 			return fmt.Errorf("dev requires every applicable Docker ignore file to protect .env.secrets and .env.secrets-*")
 		}

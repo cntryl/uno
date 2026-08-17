@@ -157,12 +157,8 @@ func (a *Adapter) readMany(ctx context.Context, refs []provider.Reference, desti
 	if len(refs) == 0 {
 		return nil, nil
 	}
-	if destination {
-		for _, ref := range refs {
-			if sourceOnly(ref) {
-				return nil, &provider.Error{Kind: provider.InvalidBinding}
-			}
-		}
+	if err := validateReadMode(refs, destination); err != nil {
+		return nil, err
 	}
 	item, err := a.load(ctx, refs[0])
 	if err != nil {
@@ -180,54 +176,62 @@ func (a *Adapter) readMany(ctx context.Context, refs []provider.Reference, desti
 		return nil, err
 	}
 	for _, ref := range refs {
-		if ref.Key == notesSelector {
-			values[ref.Binding()] = provider.ReadResult{Value: secret.New(item.Notes), Found: true}
-			continue
-		}
-		if ref.Key == documentSelector {
-			result, err := a.readDocument(ctx, item)
-			if err != nil {
-				return fail(err)
-			}
-			values[ref.Binding()] = result
-			continue
-		}
-		if selector, ok := strings.CutPrefix(ref.Key, fileSelectorPrefix); ok {
-			result, err := a.readAttachment(ctx, item, selector)
-			if err != nil {
-				return fail(err)
-			}
-			values[ref.Binding()] = result
-			continue
-		}
-		if ref.Blob() {
-			if item.Category != op.ItemCategorySecureNote {
-				return fail(&provider.Error{Kind: provider.InvalidState})
-			}
-			values[ref.Binding()] = provider.ReadResult{Value: secret.New(item.Notes), Found: true}
-			continue
-		}
-		section, field := splitKey(ref.Key)
-		sectionID, err := findSection(item, section)
+		result, err := a.readReference(ctx, item, ref, destination)
 		if err != nil {
 			return fail(err)
 		}
-		matches := []op.ItemField{}
-		for _, candidate := range item.Fields {
-			if (candidate.ID == field || candidate.Title == field) && sameSection(candidate.SectionID, sectionID) && (!destination || candidate.FieldType == op.ItemFieldTypeConcealed) {
-				matches = append(matches, candidate)
-			}
-		}
-		if len(matches) == 0 {
-			values[ref.Binding()] = provider.ReadResult{}
-			continue
-		}
-		if len(matches) > 1 {
-			return fail(&provider.Error{Kind: provider.Ambiguous})
-		}
-		values[ref.Binding()] = provider.ReadResult{Value: secret.New(matches[0].Value), Found: true}
+		values[ref.Binding()] = result
 	}
 	return values, nil
+}
+func validateReadMode(refs []provider.Reference, destination bool) error {
+	if !destination {
+		return nil
+	}
+	for _, ref := range refs {
+		if sourceOnly(ref) {
+			return &provider.Error{Kind: provider.InvalidBinding}
+		}
+	}
+	return nil
+}
+func (a *Adapter) readReference(ctx context.Context, item *op.Item, ref provider.Reference, destination bool) (provider.ReadResult, error) {
+	if ref.Key == notesSelector {
+		return provider.ReadResult{Value: secret.New(item.Notes), Found: true}, nil
+	}
+	if ref.Key == documentSelector {
+		return a.readDocument(ctx, item)
+	}
+	if selector, ok := strings.CutPrefix(ref.Key, fileSelectorPrefix); ok {
+		return a.readAttachment(ctx, item, selector)
+	}
+	if ref.Blob() {
+		if item.Category != op.ItemCategorySecureNote {
+			return provider.ReadResult{}, &provider.Error{Kind: provider.InvalidState}
+		}
+		return provider.ReadResult{Value: secret.New(item.Notes), Found: true}, nil
+	}
+	return readField(item, ref.Key, destination)
+}
+func readField(item *op.Item, key string, destination bool) (provider.ReadResult, error) {
+	section, field := splitKey(key)
+	sectionID, err := findSection(item, section)
+	if err != nil {
+		return provider.ReadResult{}, err
+	}
+	matches := []op.ItemField{}
+	for _, candidate := range item.Fields {
+		if (candidate.ID == field || candidate.Title == field) && sameSection(candidate.SectionID, sectionID) && (!destination || candidate.FieldType == op.ItemFieldTypeConcealed) {
+			matches = append(matches, candidate)
+		}
+	}
+	if len(matches) == 0 {
+		return provider.ReadResult{}, nil
+	}
+	if len(matches) > 1 {
+		return provider.ReadResult{}, &provider.Error{Kind: provider.Ambiguous}
+	}
+	return provider.ReadResult{Value: secret.New(matches[0].Value), Found: true}, nil
 }
 
 func (a *Adapter) readDocument(ctx context.Context, item *op.Item) (provider.ReadResult, error) {

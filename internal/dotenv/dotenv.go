@@ -21,31 +21,8 @@ func Write(path string, values map[string]secret.Value) error {
 	}
 	temporaryPath := temporary.Name()
 	defer func() { _ = os.Remove(temporaryPath) }()
-	if err := temporary.Chmod(0o600); err != nil {
-		_ = temporary.Close()
-		return fmt.Errorf("could not secure temporary secrets file")
-	}
-	if err := secureFile(temporaryPath); err != nil {
-		_ = temporary.Close()
-		return fmt.Errorf("could not secure temporary secrets file")
-	}
-	for _, key := range secret.SortedKeys(values) {
-		encoded, encodeErr := encode(values[key].Reveal())
-		if encodeErr != nil {
-			_ = temporary.Close()
-			return fmt.Errorf("could not encode secret %s", key)
-		}
-		if _, err := fmt.Fprintf(temporary, "%s=%s\n", key, encoded); err != nil {
-			_ = temporary.Close()
-			return fmt.Errorf("could not write temporary secrets file")
-		}
-	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return fmt.Errorf("could not sync temporary secrets file")
-	}
-	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("could not close temporary secrets file")
+	if err := writeTemporary(temporary, temporaryPath, values); err != nil {
+		return err
 	}
 	if err := replaceFile(temporaryPath, path); err != nil {
 		return fmt.Errorf("could not replace secrets file")
@@ -54,6 +31,34 @@ func Write(path string, values map[string]secret.Value) error {
 		return fmt.Errorf("could not verify secrets file permissions")
 	}
 	return nil
+}
+func writeTemporary(file *os.File, path string, values map[string]secret.Value) error {
+	if err := file.Chmod(0o600); err != nil {
+		return closeWith(file, "could not secure temporary secrets file")
+	}
+	if err := secureFile(path); err != nil {
+		return closeWith(file, "could not secure temporary secrets file")
+	}
+	for _, key := range secret.SortedKeys(values) {
+		encoded, err := encode(values[key].Reveal())
+		if err != nil {
+			return closeWith(file, "could not encode secret "+key)
+		}
+		if _, err := fmt.Fprintf(file, "%s=%s\n", key, encoded); err != nil {
+			return closeWith(file, "could not write temporary secrets file")
+		}
+	}
+	if err := file.Sync(); err != nil {
+		return closeWith(file, "could not sync temporary secrets file")
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("could not close temporary secrets file")
+	}
+	return nil
+}
+func closeWith(file *os.File, message string) error {
+	_ = file.Close()
+	return fmt.Errorf("%s", message)
 }
 
 func encode(value string) (string, error) {

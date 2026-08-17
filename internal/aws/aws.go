@@ -3,8 +3,6 @@ package aws
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"time"
 
@@ -21,16 +19,11 @@ type SecretsAPI interface {
 	PutSecretValue(context.Context, *sm.PutSecretValueInput, ...func(*sm.Options)) (*sm.PutSecretValueOutput, error)
 	UpdateSecretVersionStage(context.Context, *sm.UpdateSecretVersionStageInput, ...func(*sm.Options)) (*sm.UpdateSecretVersionStageOutput, error)
 }
-type secretsDescriber interface {
-	DescribeSecret(context.Context, *sm.DescribeSecretInput, ...func(*sm.Options)) (*sm.DescribeSecretOutput, error)
-}
 type Secrets struct {
 	C      SecretsAPI
 	wait   func(context.Context, time.Duration) error
 	jitter func(time.Duration) time.Duration
 }
-
-const maxWriteAttempts = 4
 
 func (s *Secrets) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]provider.ReadResult, error) {
 	if err := provider.ValidateReadGroup(refs); err != nil {
@@ -50,155 +43,6 @@ func (s *Secrets) ReadMany(ctx context.Context, refs []provider.Reference) (map[
 		return nil, &provider.Error{Kind: provider.InvalidState}
 	}
 	return provider.ReadJSONDocument(refs, []byte(*out.SecretString))
-}
-
-func (s *Secrets) WriteMany(ctx context.Context, writes []provider.Write) (provider.Receipt, error) {
-	if err := provider.ValidateWriteGroup(writes); err != nil {
-		return provider.Receipt{}, err
-	}
-	if len(writes) == 0 {
-		return provider.Receipt{}, nil
-	}
-	id := writes[0].Reference.Container
-	for attempt := range maxWriteAttempts {
-		out, getErr := s.C.GetSecretValue(ctx, &sm.GetSecretValueInput{SecretId: &id})
-		if isMissing(getErr) {
-			payload, err := provider.MergeJSONDocument(nil, writes)
-			if err != nil {
-				return provider.Receipt{}, err
-			}
-			payloadString := string(payload)
-			if describer, ok := s.C.(secretsDescriber); ok {
-				_, describeErr := describer.DescribeSecret(ctx, &sm.DescribeSecretInput{SecretId: &id})
-				switch {
-				case describeErr == nil:
-					token, tokenErr := randomToken()
-					if tokenErr != nil {
-						return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
-					}
-					_, putErr := s.C.PutSecretValue(ctx, &sm.PutSecretValueInput{
-						SecretId: &id, SecretString: &payloadString, ClientRequestToken: &token,
-					})
-					if putErr != nil {
-						return provider.Receipt{}, remoteError(putErr)
-					}
-					return provider.Receipt{Completed: provider.Environments(writes)}, nil
-				case !isMissing(describeErr):
-					return provider.Receipt{}, remoteError(describeErr)
-				}
-			}
-			if _, err = s.C.CreateSecret(ctx, &sm.CreateSecretInput{Name: &id, SecretString: &payloadString}); err == nil {
-				return provider.Receipt{Completed: provider.Environments(writes)}, nil
-			}
-			var exists *smtypes.ResourceExistsException
-			if !errors.As(err, &exists) {
-				return provider.Receipt{}, remoteError(err)
-			}
-			if attempt == maxWriteAttempts-1 {
-				return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
-			}
-			if err := s.waitBeforeRetry(ctx, attempt); err != nil {
-				return provider.Receipt{}, err
-			}
-			continue
-		}
-		if getErr != nil {
-			return provider.Receipt{}, remoteError(getErr)
-		}
-		if out.VersionId == nil {
-			return provider.Receipt{}, &provider.Error{Kind: provider.InvalidState}
-		}
-		var existing []byte
-		if out.SecretString != nil {
-			existing = []byte(*out.SecretString)
-		}
-		payload, err := provider.MergeJSONDocument(existing, writes)
-		if err != nil {
-			return provider.Receipt{}, err
-		}
-		payloadString := string(payload)
-		token, err := randomToken()
-		if err != nil {
-			return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
-		}
-		stage := "UNO-PENDING-" + token
-		put, err := s.C.PutSecretValue(ctx, &sm.PutSecretValueInput{SecretId: &id, SecretString: &payloadString, ClientRequestToken: &token, VersionStages: []string{stage}})
-		if err != nil {
-			return provider.Receipt{}, remoteError(err)
-		}
-		version := token
-		if put.VersionId != nil {
-			version = *put.VersionId
-		}
-		_, promoteErr := s.C.UpdateSecretVersionStage(ctx, &sm.UpdateSecretVersionStageInput{SecretId: &id, VersionStage: stringPtr("AWSCURRENT"), MoveToVersionId: &version, RemoveFromVersionId: out.VersionId})
-		if promoteErr == nil {
-			if err := s.removePending(ctx, id, stage, version); err != nil {
-				return provider.Receipt{Completed: provider.Environments(writes)}, err
-			}
-			return provider.Receipt{Completed: provider.Environments(writes)}, nil
-		}
-		current, observeErr := s.C.GetSecretValue(ctx, &sm.GetSecretValueInput{SecretId: &id})
-		if observeErr != nil || current == nil || current.VersionId == nil {
-			if err := s.removePending(ctx, id, stage, version); err != nil {
-				return provider.Receipt{}, err
-			}
-			return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
-		}
-		cleanupErr := s.removePending(ctx, id, stage, version)
-		switch *current.VersionId {
-		case version:
-			if cleanupErr != nil {
-				return provider.Receipt{Completed: provider.Environments(writes)}, cleanupErr
-			}
-			return provider.Receipt{Completed: provider.Environments(writes)}, nil
-		case *out.VersionId:
-			if cleanupErr != nil {
-				return provider.Receipt{}, cleanupErr
-			}
-			if attempt == maxWriteAttempts-1 {
-				return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
-			}
-			if err := s.waitBeforeRetry(ctx, attempt); err != nil {
-				return provider.Receipt{}, err
-			}
-			continue
-		default:
-			if cleanupErr != nil {
-				return provider.Receipt{}, cleanupErr
-			}
-			if attempt == maxWriteAttempts-1 {
-				return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
-			}
-			if err := s.waitBeforeRetry(ctx, attempt); err != nil {
-				return provider.Receipt{}, err
-			}
-			continue
-		}
-	}
-	return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
-}
-
-// removePendingCleanupTimeout bounds the detached context used to strip a
-// pending version stage after the caller's context has already expired, so a
-// cleanup attempt following a timeout still gets a chance to run instead of
-// failing immediately and leaking the stage forever.
-const removePendingCleanupTimeout = 10 * time.Second
-
-func (s *Secrets) removePending(ctx context.Context, id, stage, version string) error {
-	if ctx.Err() != nil {
-		// The caller's context is already done (e.g. deadline exceeded during
-		// promotion). Detach from it so this cleanup call isn't doomed to fail
-		// before it even starts, which would otherwise leave the UNO-PENDING-*
-		// stage attached to the secret version forever.
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), removePendingCleanupTimeout)
-		defer cancel()
-	}
-	_, err := s.C.UpdateSecretVersionStage(ctx, &sm.UpdateSecretVersionStageInput{SecretId: &id, VersionStage: &stage, RemoveFromVersionId: &version})
-	if err != nil {
-		return &provider.Error{Kind: provider.PendingCleanupFailed}
-	}
-	return nil
 }
 
 // Rollback moves AWSCURRENT back to whatever AWSPREVIOUS currently points
@@ -232,16 +76,6 @@ func (s *Secrets) Rollback(ctx context.Context, ref provider.Reference) error {
 	return nil
 }
 
-func (s *Secrets) waitBeforeRetry(ctx context.Context, attempt int) error {
-	return provider.WaitBeforeRetry(ctx, attempt, s.wait, s.jitter)
-}
-func randomToken() (string, error) {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b[:]), nil
-}
 func stringPtr(s string) *string { return &s }
 
 func isMissing(err error) bool {

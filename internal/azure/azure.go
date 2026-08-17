@@ -107,26 +107,10 @@ func (a *KeyVault) Rollback(ctx context.Context, ref provider.Reference) error {
 	if err != nil {
 		return remoteError(err)
 	}
-	usable := make([]azsecrets.SecretProperties, 0, len(versions))
-	for _, version := range versions {
-		if version.ID == nil || version.ID.Version() == "" || version.Attributes == nil || version.Attributes.Created == nil {
-			// Without a complete ordering key we cannot prove which version is
-			// immediately prior. Failing closed avoids silently skipping it.
-			return &provider.Error{Kind: provider.InvalidState}
-		}
-		usable = append(usable, version)
+	previous, err := previousVersion(versions)
+	if err != nil {
+		return err
 	}
-	if len(usable) < 2 {
-		return &provider.Error{Kind: provider.InvalidState, Detail: "no previous version to roll back to"}
-	}
-	sort.Slice(usable, func(i, j int) bool {
-		a, b := usable[i], usable[j]
-		if !a.Attributes.Created.Equal(*b.Attributes.Created) {
-			return a.Attributes.Created.Before(*b.Attributes.Created)
-		}
-		return a.ID.Version() < b.ID.Version()
-	})
-	previous := usable[len(usable)-2]
 	response, err := a.C.GetSecret(ctx, ref.Container, previous.ID.Version())
 	if err != nil {
 		return remoteError(err)
@@ -139,6 +123,24 @@ func (a *KeyVault) Rollback(ctx context.Context, ref provider.Reference) error {
 		return remoteError(err)
 	}
 	return nil
+}
+func previousVersion(versions []azsecrets.SecretProperties) (azsecrets.SecretProperties, error) {
+	for _, version := range versions {
+		if version.ID == nil || version.ID.Version() == "" || version.Attributes == nil || version.Attributes.Created == nil {
+			return azsecrets.SecretProperties{}, &provider.Error{Kind: provider.InvalidState}
+		}
+	}
+	if len(versions) < 2 {
+		return azsecrets.SecretProperties{}, &provider.Error{Kind: provider.InvalidState, Detail: "no previous version to roll back to"}
+	}
+	sort.Slice(versions, func(i, j int) bool {
+		a, b := versions[i], versions[j]
+		if !a.Attributes.Created.Equal(*b.Attributes.Created) {
+			return a.Attributes.Created.Before(*b.Attributes.Created)
+		}
+		return a.ID.Version() < b.ID.Version()
+	})
+	return versions[len(versions)-2], nil
 }
 
 func statusCode(err error, code int) bool {

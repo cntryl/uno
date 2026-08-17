@@ -586,13 +586,7 @@ func TestShouldWriteEscapedSecretsFileWithRestrictedPermissionsGivenDevCommand(t
 	adapter := &cliAdapter{value: "line one\n\"$VALUE\"\\end"}
 	providers := cliRegistry(adapter)
 	temporary := t.TempDir()
-	t.Chdir(temporary)
-	if err := exec.CommandContext(t.Context(), "git", "init", "-q").Run(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(".gitignore", []byte(".env.secrets*\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	initDevRepo(t, temporary)
 	path := templateFile(t)
 	if _, _, err := run([]string{"--template", path, "dev"}, providers); err != nil {
 		t.Fatal(err)
@@ -615,13 +609,7 @@ func TestShouldWriteEscapedSecretsFileWithRestrictedPermissionsGivenDevCommand(t
 
 func TestShouldLeaveExistingSecretsFileUnchangedGivenDevTemplateWithNoMappings(t *testing.T) {
 	adapter := &cliAdapter{}
-	t.Chdir(t.TempDir())
-	if err := exec.CommandContext(t.Context(), "git", "init", "-q").Run(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(".gitignore", []byte(".env.secrets*\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	initDevRepo(t, t.TempDir())
 	const existing = "MY_API_KEY=existing-value\n"
 	if err := os.WriteFile(".env.secrets", []byte(existing), 0o600); err != nil {
 		t.Fatal(err)
@@ -651,13 +639,7 @@ func TestShouldIgnoreUnsetDestinationAliasEnvironmentGivenDevCommand(t *testing.
 	providers := provider.NewRegistry()
 	providers.Register("fake", aliasCliFactory{adapter})
 	temporary := t.TempDir()
-	t.Chdir(temporary)
-	if err := exec.CommandContext(t.Context(), "git", "init", "-q").Run(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(".gitignore", []byte(".env.secrets*\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	initDevRepo(t, temporary)
 	path := filepath.Join(temporary, "template")
 	input := "@runtime=fake://$DESTINATION_CONTAINER\nVALUE=fake://source/VALUE -> @runtime\n"
 	if err := os.WriteFile(path, []byte(input), 0o600); err != nil {
@@ -684,6 +666,16 @@ func TestShouldIgnoreUnsetDestinationAliasEnvironmentGivenDevCommand(t *testing.
 	}
 	if got, want := string(data), "VALUE=\"resolved\"\n"; got != want {
 		t.Fatalf("contents=%q want=%q", got, want)
+	}
+}
+func initDevRepo(t *testing.T, directory string) {
+	t.Helper()
+	t.Chdir(directory)
+	if err := exec.CommandContext(t.Context(), "git", "init", "-q").Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(".gitignore", []byte(".env.secrets*\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

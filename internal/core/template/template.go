@@ -51,86 +51,9 @@ func parseEnv(input string, env func(string) (string, bool), expandDestinations 
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		eq := strings.IndexByte(line, '=')
-		if eq < 0 {
-			return nil, terr(i+1, 1, "mapping must contain =")
+		if err := parseLine(f, seen, aliases, line, trimmed, i+1, env, expandDestinations); err != nil {
+			return nil, err
 		}
-		key := strings.TrimSpace(line[:eq])
-		if strings.HasPrefix(trimmed, "@") {
-			if !validAlias(key) {
-				return nil, terr(i+1, 1, "invalid destination alias name")
-			}
-			if aliases[key] != nil {
-				return nil, terr(i+1, 1, "duplicate destination alias")
-			}
-			prefixRaw := strings.TrimSpace(line[eq+1:])
-			if prefixRaw == "" {
-				return nil, terr(i+1, eq+2, "destination alias prefix is required")
-			}
-			if strings.HasPrefix(prefixRaw, "@") {
-				return nil, terr(i+1, eq+2, "destination aliases cannot reference aliases")
-			}
-			prefix := prefixRaw
-			if expandDestinations {
-				var err error
-				prefix, err = expand(prefixRaw, env)
-				if err != nil {
-					return nil, terr(i+1, eq+2, err.Error())
-				}
-			}
-			if strings.HasPrefix(prefix, "@") {
-				return nil, terr(i+1, eq+2, "destination aliases cannot reference aliases")
-			}
-			if strings.HasSuffix(prefix, "/") {
-				return nil, terr(i+1, eq+2, "destination alias prefix must not end with /")
-			}
-			aliases[key] = &destinationAlias{prefix: prefix, line: i + 1}
-			continue
-		}
-		if !validKey(key) {
-			return nil, terr(i+1, 1, "invalid environment key")
-		}
-		if seen[key] {
-			return nil, terr(i+1, 1, "duplicate environment key")
-		}
-		seen[key] = true
-		rest := line[eq+1:]
-		arrow := strings.Index(rest, "->")
-		if arrow < 0 || strings.Contains(rest[arrow+2:], "->") {
-			return nil, terr(i+1, eq+2, "mapping must contain exactly one ->")
-		}
-		sourceRaw, destinationRaw := strings.TrimSpace(rest[:arrow]), strings.TrimSpace(rest[arrow+2:])
-		if sourceRaw == "" || destinationRaw == "" {
-			return nil, terr(i+1, eq+2, "source and destination references are required")
-		}
-		if strings.HasPrefix(sourceRaw, "@") {
-			return nil, terr(i+1, eq+2, "destination aliases cannot be used as sources")
-		}
-		source, err := expand(sourceRaw, env)
-		if err != nil {
-			return nil, terr(i+1, eq+2, err.Error())
-		}
-		var destination string
-		switch {
-		case strings.HasPrefix(destinationRaw, "@"):
-			if !validAlias(destinationRaw) {
-				return nil, terr(i+1, eq+arrow+4, "destination alias must be the entire destination")
-			}
-			alias := aliases[destinationRaw]
-			if alias == nil {
-				return nil, terr(i+1, eq+arrow+4, "destination alias is undefined or declared after use")
-			}
-			alias.used = true
-			destination = alias.prefix + "/" + key
-		case expandDestinations:
-			destination, err = expand(destinationRaw, env)
-			if err != nil {
-				return nil, terr(i+1, eq+arrow+4, err.Error())
-			}
-		default:
-			destination = destinationRaw
-		}
-		f.Entries = append(f.Entries, Entry{key, source, destination, i + 1})
 	}
 	for _, alias := range aliases {
 		if !alias.used {
@@ -138,6 +61,98 @@ func parseEnv(input string, env func(string) (string, bool), expandDestinations 
 		}
 	}
 	return f, nil
+}
+
+func parseLine(f *File, seen map[string]bool, aliases map[string]*destinationAlias, line, trimmed string, number int, env func(string) (string, bool), expandDestinations bool) error {
+	eq := strings.IndexByte(line, '=')
+	if eq < 0 {
+		return terr(number, 1, "mapping must contain =")
+	}
+	key := strings.TrimSpace(line[:eq])
+	if strings.HasPrefix(trimmed, "@") {
+		return parseAlias(aliases, key, strings.TrimSpace(line[eq+1:]), number, eq, env, expandDestinations)
+	}
+	if !validKey(key) {
+		return terr(number, 1, "invalid environment key")
+	}
+	if seen[key] {
+		return terr(number, 1, "duplicate environment key")
+	}
+	seen[key] = true
+	sourceRaw, destinationRaw, arrow, err := mappingParts(line[eq+1:], number, eq)
+	if err != nil {
+		return err
+	}
+	source, err := expand(sourceRaw, env)
+	if err != nil {
+		return terr(number, eq+2, err.Error())
+	}
+	destination, err := resolveDestination(destinationRaw, key, aliases, env, expandDestinations)
+	if err != nil {
+		return terr(number, eq+arrow+4, err.Error())
+	}
+	f.Entries = append(f.Entries, Entry{key, source, destination, number})
+	return nil
+}
+func mappingParts(rest string, line, eq int) (string, string, int, error) {
+	arrow := strings.Index(rest, "->")
+	if arrow < 0 || strings.Contains(rest[arrow+2:], "->") {
+		return "", "", 0, terr(line, eq+2, "mapping must contain exactly one ->")
+	}
+	source, destination := strings.TrimSpace(rest[:arrow]), strings.TrimSpace(rest[arrow+2:])
+	if source == "" || destination == "" {
+		return "", "", 0, terr(line, eq+2, "source and destination references are required")
+	}
+	if strings.HasPrefix(source, "@") {
+		return "", "", 0, terr(line, eq+2, "destination aliases cannot be used as sources")
+	}
+	return source, destination, arrow, nil
+}
+func parseAlias(aliases map[string]*destinationAlias, key, prefix string, line, eq int, env func(string) (string, bool), expandDestinations bool) error {
+	if !validAlias(key) {
+		return terr(line, 1, "invalid destination alias name")
+	}
+	if aliases[key] != nil {
+		return terr(line, 1, "duplicate destination alias")
+	}
+	if prefix == "" {
+		return terr(line, eq+2, "destination alias prefix is required")
+	}
+	if strings.HasPrefix(prefix, "@") {
+		return terr(line, eq+2, "destination aliases cannot reference aliases")
+	}
+	if expandDestinations {
+		expanded, err := expand(prefix, env)
+		if err != nil {
+			return terr(line, eq+2, err.Error())
+		}
+		prefix = expanded
+	}
+	if strings.HasPrefix(prefix, "@") {
+		return terr(line, eq+2, "destination aliases cannot reference aliases")
+	}
+	if strings.HasSuffix(prefix, "/") {
+		return terr(line, eq+2, "destination alias prefix must not end with /")
+	}
+	aliases[key] = &destinationAlias{prefix: prefix, line: line}
+	return nil
+}
+func resolveDestination(raw, key string, aliases map[string]*destinationAlias, env func(string) (string, bool), expandDestinations bool) (string, error) {
+	if strings.HasPrefix(raw, "@") {
+		if !validAlias(raw) {
+			return "", fmt.Errorf("destination alias must be the entire destination")
+		}
+		alias := aliases[raw]
+		if alias == nil {
+			return "", fmt.Errorf("destination alias is undefined or declared after use")
+		}
+		alias.used = true
+		return alias.prefix + "/" + key, nil
+	}
+	if expandDestinations {
+		return expand(raw, env)
+	}
+	return raw, nil
 }
 
 func validAlias(s string) bool {
@@ -152,23 +167,11 @@ func expand(s string, env func(string) (string, bool)) (string, error) {
 			i++
 			continue
 		}
-		i++
-		var name string
-		if i < len(s) && s[i] == '{' {
-			end := strings.IndexByte(s[i+1:], '}')
-			if end < 0 {
-				return "", fmt.Errorf("malformed environment interpolation")
-			}
-			name = s[i+1 : i+1+end]
-			i += end + 2
-		} else {
-			j := i
-			for j < len(s) && ((s[j] >= 'A' && s[j] <= 'Z') || (s[j] >= 'a' && s[j] <= 'z') || (j > i && s[j] >= '0' && s[j] <= '9') || s[j] == '_') {
-				j++
-			}
-			name = s[i:j]
-			i = j
+		name, next, err := interpolation(s, i+1)
+		if err != nil {
+			return "", err
 		}
+		i = next
 		if name == "" || !validKey(name) {
 			return "", fmt.Errorf("malformed environment interpolation")
 		}
@@ -183,15 +186,30 @@ func expand(s string, env func(string) (string, bool)) (string, error) {
 	}
 	return out.String(), nil
 }
+func interpolation(s string, start int) (string, int, error) {
+	if start < len(s) && s[start] == '{' {
+		end := strings.IndexByte(s[start+1:], '}')
+		if end < 0 {
+			return "", 0, fmt.Errorf("malformed environment interpolation")
+		}
+		return s[start+1 : start+1+end], start + end + 2, nil
+	}
+	end := start
+	for end < len(s) && identifierByte(s[end], end == start) {
+		end++
+	}
+	return s[start:end], end, nil
+}
+func identifierByte(c byte, first bool) bool {
+	letter := (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+	return letter || c == '_' || (!first && c >= '0' && c <= '9')
+}
 func validKey(s string) bool {
 	if s == "" {
 		return false
 	}
 	for i, c := range []byte(s) {
-		if i == 0 && !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_') {
-			return false
-		}
-		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
+		if !identifierByte(c, i == 0) {
 			return false
 		}
 	}

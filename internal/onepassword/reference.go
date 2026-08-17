@@ -37,33 +37,42 @@ func Parse(raw string) (provider.Reference, error) {
 			return provider.InvalidParse("1Password vault, item, and field segments must not be empty")
 		}
 	}
-	key := ""
-	if hasQuery {
-		if len(parts) != 2 {
-			return provider.InvalidParse("1Password content selectors require an item-only path")
-		}
-		switch {
-		case query == "notes":
-			key = notesSelector
-		case query == "document":
-			key = documentSelector
-		case strings.HasPrefix(query, "file="):
-			selector := strings.TrimPrefix(query, "file=")
-			segments := strings.Split(selector, "/")
-			for _, segment := range segments {
-				if segment == "" || strings.ContainsRune(segment, '?') {
-					return provider.InvalidParse("1Password file selector requires non-empty path segments")
-				}
-			}
-			key = fileSelectorPrefix + selector
-		default:
-			return provider.InvalidParse("unknown 1Password content selector")
-		}
-	} else if len(parts) > 2 {
-		key = strings.Join(parts[2:], "/")
+	key, err := parseKey(parts, query, hasQuery)
+	if err != nil {
+		return provider.Reference{}, err
 	}
 	return provider.Reference{Scheme: "op", Region: parts[0], Container: parts[1], Key: key, AdapterKey: "op"}, nil
 }
+func parseKey(parts []string, query string, hasQuery bool) (string, error) {
+	if !hasQuery {
+		if len(parts) > 2 {
+			return strings.Join(parts[2:], "/"), nil
+		}
+		return "", nil
+	}
+	if len(parts) != 2 {
+		return "", invalidReference("1Password content selectors require an item-only path")
+	}
+	switch {
+	case query == "notes":
+		return notesSelector, nil
+	case query == "document":
+		return documentSelector, nil
+	case strings.HasPrefix(query, "file="):
+		return parseFileSelector(strings.TrimPrefix(query, "file="))
+	default:
+		return "", invalidReference("unknown 1Password content selector")
+	}
+}
+func parseFileSelector(selector string) (string, error) {
+	for _, segment := range strings.Split(selector, "/") {
+		if segment == "" || strings.ContainsRune(segment, '?') {
+			return "", invalidReference("1Password file selector requires non-empty path segments")
+		}
+	}
+	return fileSelectorPrefix + selector, nil
+}
+func invalidReference(message string) error { _, err := provider.InvalidParse(message); return err }
 
 func New(ctx context.Context) (*Adapter, error) {
 	options, err := clientOptions(os.Getenv("OP_SERVICE_ACCOUNT_TOKEN"), os.Getenv("OP_ACCOUNT"))

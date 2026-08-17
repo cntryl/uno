@@ -68,39 +68,9 @@ func (s *SecretManager) WriteMany(ctx context.Context, writes []provider.Write) 
 	}
 	ref := writes[0].Reference
 	name := secretName(ref)
-	existing, err := s.C.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{Name: name + "/versions/latest"})
-	var existingData []byte
-	switch {
-	case err == nil:
-		if existing == nil || existing.GetPayload() == nil {
-			return provider.Receipt{}, &provider.Error{Kind: provider.InvalidState}
-		}
-		existingData = existing.GetPayload().GetData()
-	case isNotFound(err):
-		created, createErr := s.C.CreateSecret(ctx, &secretmanagerpb.CreateSecretRequest{
-			Parent:   "projects/" + ref.Region,
-			SecretId: ref.Container,
-			Secret: &secretmanagerpb.Secret{
-				Replication: &secretmanagerpb.Replication{Replication: &secretmanagerpb.Replication_Automatic_{Automatic: &secretmanagerpb.Replication_Automatic{}}},
-			},
-		})
-		if createErr != nil {
-			if !isAlreadyExists(createErr) {
-				return provider.Receipt{}, remoteError(createErr)
-			}
-			existing, err = s.C.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{Name: name + "/versions/latest"})
-			if err != nil {
-				return provider.Receipt{}, remoteError(err)
-			}
-			if existing == nil || existing.GetPayload() == nil {
-				return provider.Receipt{}, &provider.Error{Kind: provider.InvalidState}
-			}
-			existingData = existing.GetPayload().GetData()
-		} else if created == nil {
-			return provider.Receipt{}, &provider.Error{Kind: provider.InvalidState}
-		}
-	default:
-		return provider.Receipt{}, remoteError(err)
+	existingData, err := s.loadOrCreate(ctx, ref, name)
+	if err != nil {
+		return provider.Receipt{}, err
 	}
 	payload, err := provider.MergeJSONDocument(existingData, writes)
 	if err != nil {
@@ -114,6 +84,36 @@ func (s *SecretManager) WriteMany(ctx context.Context, writes []provider.Write) 
 		return provider.Receipt{}, &provider.Error{Kind: provider.InvalidState}
 	}
 	return provider.Receipt{Completed: provider.Environments(writes)}, nil
+}
+func (s *SecretManager) loadOrCreate(ctx context.Context, ref provider.Reference, name string) ([]byte, error) {
+	existing, err := s.C.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{Name: name + "/versions/latest"})
+	if err == nil {
+		return payloadData(existing)
+	}
+	if !isNotFound(err) {
+		return nil, remoteError(err)
+	}
+	created, createErr := s.C.CreateSecret(ctx, &secretmanagerpb.CreateSecretRequest{Parent: "projects/" + ref.Region, SecretId: ref.Container, Secret: &secretmanagerpb.Secret{Replication: &secretmanagerpb.Replication{Replication: &secretmanagerpb.Replication_Automatic_{Automatic: &secretmanagerpb.Replication_Automatic{}}}}})
+	if createErr == nil {
+		if created == nil {
+			return nil, &provider.Error{Kind: provider.InvalidState}
+		}
+		return nil, nil
+	}
+	if !isAlreadyExists(createErr) {
+		return nil, remoteError(createErr)
+	}
+	existing, err = s.C.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{Name: name + "/versions/latest"})
+	if err != nil {
+		return nil, remoteError(err)
+	}
+	return payloadData(existing)
+}
+func payloadData(existing *secretmanagerpb.AccessSecretVersionResponse) ([]byte, error) {
+	if existing == nil || existing.GetPayload() == nil {
+		return nil, &provider.Error{Kind: provider.InvalidState}
+	}
+	return existing.GetPayload().GetData(), nil
 }
 
 // Rollback fetches the value one version behind the secret's latest version

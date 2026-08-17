@@ -55,23 +55,11 @@ func (v *Vault) ReadMany(ctx context.Context, refs []provider.Reference) (map[st
 		if ref.Region != refs[0].Region || ref.Container != refs[0].Container {
 			return fail(&provider.Error{Kind: provider.InvalidBinding})
 		}
-		if got == nil || got.Data == nil {
-			values[ref.Binding()] = provider.ReadResult{}
-			continue
+		result, err := decodeResult(got, ref.Key)
+		if err != nil {
+			return fail(err)
 		}
-		raw, ok := got.Data[ref.Key]
-		if !ok {
-			values[ref.Binding()] = provider.ReadResult{}
-			continue
-		}
-		if raw == nil {
-			return fail(&provider.Error{Kind: provider.InvalidState})
-		}
-		str, ok := raw.(string)
-		if !ok {
-			return fail(&provider.Error{Kind: provider.InvalidState})
-		}
-		values[ref.Binding()] = provider.ReadResult{Value: secret.New(str), Found: true}
+		values[ref.Binding()] = result
 	}
 	return values, nil
 }
@@ -90,24 +78,7 @@ func (v *Vault) WriteMany(ctx context.Context, writes []provider.Write) (provide
 	mount, path := writes[0].Reference.Region, writes[0].Reference.Container
 	kv := v.Mount(mount)
 	for attempt := range maxWriteAttempts {
-		existing, getErr := kv.Get(ctx, path)
-		cas := 0
-		data := map[string]interface{}{}
-		switch {
-		case getErr == nil && existing != nil:
-			for k, val := range existing.Data {
-				data[k] = val
-			}
-			if existing.VersionMetadata != nil {
-				cas = existing.VersionMetadata.Version
-			}
-		case getErr != nil && !errors.Is(getErr, vaultapi.ErrSecretNotFound):
-			return provider.Receipt{}, remoteError(getErr)
-		}
-		for _, write := range writes {
-			data[write.Reference.Key] = write.Value.Reveal()
-		}
-		_, putErr := kv.Put(ctx, path, data, vaultapi.WithCheckAndSet(cas))
+		putErr := writeAttempt(ctx, kv, path, writes)
 		if putErr == nil {
 			return provider.Receipt{Completed: provider.Environments(writes)}, nil
 		}
@@ -122,6 +93,41 @@ func (v *Vault) WriteMany(ctx context.Context, writes []provider.Write) (provide
 		}
 	}
 	return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
+}
+func decodeResult(got *vaultapi.KVSecret, key string) (provider.ReadResult, error) {
+	if got == nil || got.Data == nil {
+		return provider.ReadResult{}, nil
+	}
+	raw, ok := got.Data[key]
+	if !ok {
+		return provider.ReadResult{}, nil
+	}
+	str, ok := raw.(string)
+	if !ok || raw == nil {
+		return provider.ReadResult{}, &provider.Error{Kind: provider.InvalidState}
+	}
+	return provider.ReadResult{Value: secret.New(str), Found: true}, nil
+}
+func writeAttempt(ctx context.Context, kv VaultAPI, path string, writes []provider.Write) error {
+	existing, err := kv.Get(ctx, path)
+	if err != nil && !errors.Is(err, vaultapi.ErrSecretNotFound) {
+		return err
+	}
+	cas := 0
+	data := map[string]interface{}{}
+	if existing != nil {
+		for key, value := range existing.Data {
+			data[key] = value
+		}
+		if existing.VersionMetadata != nil {
+			cas = existing.VersionMetadata.Version
+		}
+	}
+	for _, write := range writes {
+		data[write.Reference.Key] = write.Value.Reveal()
+	}
+	_, err = kv.Put(ctx, path, data, vaultapi.WithCheckAndSet(cas))
+	return err
 }
 
 // Rollback uses Vault's own KV v2 rollback operation (a server-side copy of

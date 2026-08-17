@@ -3,13 +3,6 @@ version: '2'
 linters:
   default: all
   disable:
-    # These enforce arbitrary size/complexity budgets rather than correctness.
-    - cyclop
-    - funlen
-    - gocognit
-    - gocyclo
-    - maintidx
-    - nestif
     # The project intentionally uses ordinary errors and compact internal APIs.
     - err113
     - exhaustruct

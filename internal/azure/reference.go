@@ -42,29 +42,48 @@ func Parse(raw string) (provider.Reference, error) {
 	if err != nil || u.Scheme != "azure-key-vault" || u.Opaque != "" {
 		return provider.InvalidParse("unknown Azure Key Vault reference scheme")
 	}
-	if u.User != nil || u.Port() != "" || u.RawQuery != "" || u.Fragment != "" {
-		return provider.InvalidParse("Azure Key Vault reference contains unsupported URL data")
+	if err := validateURL(u); err != nil {
+		return provider.Reference{}, err
 	}
 	host := strings.ToLower(u.Hostname())
-	if host == "" || net.ParseIP(host) != nil || !canonicalVaultHost(host) {
-		return provider.InvalidParse("Azure Key Vault reference requires a canonical vault hostname")
+	if err := validateHost(host); err != nil {
+		return provider.Reference{}, err
 	}
 	if u.EscapedPath() != u.Path {
 		return provider.InvalidParse("Azure Key Vault path must not be escaped")
 	}
 	parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
-	if len(parts) < 1 || len(parts) > 2 || parts[0] == "" || !secretNamePattern.MatchString(parts[0]) {
-		return provider.InvalidParse("Azure Key Vault reference requires secret-name[/key]")
+	container, key, err := parsePath(parts)
+	if err != nil {
+		return provider.Reference{}, err
 	}
-	key := ""
-	if len(parts) == 2 {
-		key = parts[1]
-		if key == "" {
-			return provider.InvalidParse("Azure Key Vault key must not be empty")
-		}
-	}
-	return provider.Reference{Scheme: "azure-key-vault", Region: host, Container: parts[0], Key: key, AdapterKey: host}, nil
+	return provider.Reference{Scheme: "azure-key-vault", Region: host, Container: container, Key: key, AdapterKey: host}, nil
 }
+func validateURL(u *url.URL) error {
+	if u.User != nil || u.Port() != "" || u.RawQuery != "" || u.Fragment != "" {
+		return invalid("Azure Key Vault reference contains unsupported URL data")
+	}
+	return nil
+}
+func validateHost(host string) error {
+	if host == "" || net.ParseIP(host) != nil || !canonicalVaultHost(host) {
+		return invalid("Azure Key Vault reference requires a canonical vault hostname")
+	}
+	return nil
+}
+func parsePath(parts []string) (string, string, error) {
+	if len(parts) < 1 || len(parts) > 2 || parts[0] == "" || !secretNamePattern.MatchString(parts[0]) {
+		return "", "", invalid("Azure Key Vault reference requires secret-name[/key]")
+	}
+	if len(parts) == 1 {
+		return parts[0], "", nil
+	}
+	if parts[1] == "" {
+		return "", "", invalid("Azure Key Vault key must not be empty")
+	}
+	return parts[0], parts[1], nil
+}
+func invalid(message string) error { _, err := provider.InvalidParse(message); return err }
 
 func canonicalVaultHost(host string) bool {
 	for _, suffix := range []string{".vault.azure.net", ".vault.usgovcloudapi.net", ".vault.azure.cn", ".vault.microsoftazure.de"} {
