@@ -179,6 +179,16 @@ dotenv file. It never writes destination providers.
 If the template has no mappings, `uno dev` succeeds without creating or
 replacing `.env.secrets`.
 
+Source-resolution errors expose only a fixed, provider-neutral reason and the
+existing error-kind token. When a failure belongs to one mapping, the error
+also identifies that mapping by template line (for example,
+`line 7: read failed: source field not found in provider container (InvalidBinding)`).
+Group-wide failures such as authentication, access denial, timeout, or
+malformed container contents do not claim a mapping line. Errors never include
+environment keys, secret values, provider references, credentials, SDK
+objects or error text, regions, vaults, containers, item names, section names,
+field names, or filenames.
+
 `uno run -- <command> [args...]` injects the resolved values only into the child
 process, preserves argv and exit status, and does not create a secrets file.
 The `--` separator is required so flags intended for the child can never be

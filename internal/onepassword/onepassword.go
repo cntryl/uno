@@ -74,14 +74,17 @@ func (a *Adapter) resolveVault(ctx context.Context, name string) (string, error)
 	ids := []string{}
 	for _, vault := range vaults {
 		if vault.ID == name || vault.Title == name {
+			if vault.ID == "" {
+				return "", &provider.Error{Kind: provider.InvalidState, Diagnostic: provider.InvalidResponse}
+			}
 			ids = append(ids, vault.ID)
 		}
 	}
 	if len(ids) == 0 {
-		return "", &provider.Error{Kind: provider.InvalidBinding}
+		return "", &provider.Error{Kind: provider.InvalidBinding, Diagnostic: provider.SecretNotFound}
 	}
 	if len(ids) > 1 {
-		return "", &provider.Error{Kind: provider.Ambiguous}
+		return "", &provider.Error{Kind: provider.Ambiguous, Diagnostic: provider.AmbiguousContainer}
 	}
 	return ids[0], nil
 }
@@ -124,23 +127,38 @@ func (a *Adapter) load(ctx context.Context, ref provider.Reference) (*op.Item, e
 	if err != nil {
 		return nil, remote(err)
 	}
-	ids := []string{}
-	for _, item := range items {
-		if item.ID == ref.Container || item.Title == ref.Container {
-			ids = append(ids, item.ID)
-		}
+	ids, err := matchingItemIDs(items, ref.Container)
+	if err != nil {
+		return nil, err
 	}
 	if len(ids) == 0 {
 		return nil, nil
 	}
 	if len(ids) > 1 {
-		return nil, &provider.Error{Kind: provider.Ambiguous}
+		return nil, &provider.Error{Kind: provider.Ambiguous, Diagnostic: provider.AmbiguousContainer}
 	}
 	item, err := a.lookup.GetItem(ctx, vault, ids[0])
 	if err != nil {
 		return nil, remote(err)
 	}
+	if item.ID == "" || item.VaultID == "" {
+		return nil, &provider.Error{Kind: provider.InvalidState, Diagnostic: provider.InvalidResponse}
+	}
 	return &item, nil
+}
+
+func matchingItemIDs(items []op.ItemOverview, name string) ([]string, error) {
+	ids := []string{}
+	for _, item := range items {
+		if item.ID != name && item.Title != name {
+			continue
+		}
+		if item.ID == "" {
+			return nil, &provider.Error{Kind: provider.InvalidState, Diagnostic: provider.InvalidResponse}
+		}
+		ids = append(ids, item.ID)
+	}
+	return ids, nil
 }
 func (a *Adapter) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]provider.ReadResult, error) {
 	return a.readMany(ctx, refs, false)
@@ -165,20 +183,20 @@ func (a *Adapter) readMany(ctx context.Context, refs []provider.Reference, desti
 		return nil, err
 	}
 	if item == nil {
-		return provider.MissingResults(refs), nil
+		return provider.MissingResultsWithDiagnostic(refs, provider.SecretNotFound), nil
 	}
 	if destination && item.Category != op.ItemCategorySecureNote {
-		return nil, &provider.Error{Kind: provider.InvalidState}
+		return nil, &provider.Error{Kind: provider.InvalidState, Diagnostic: provider.UnsupportedContent}
 	}
 	values := make(map[string]provider.ReadResult, len(refs))
 	fail := func(err error) (map[string]provider.ReadResult, error) {
 		provider.DestroyReadResults(values)
 		return nil, err
 	}
-	for _, ref := range refs {
+	for index, ref := range refs {
 		result, err := a.readReference(ctx, item, ref, destination)
 		if err != nil {
-			return fail(err)
+			return fail(provider.ReadFailure(index, err))
 		}
 		values[ref.Binding()] = result
 	}
@@ -207,7 +225,7 @@ func (a *Adapter) readReference(ctx context.Context, item *op.Item, ref provider
 	}
 	if ref.Blob() {
 		if item.Category != op.ItemCategorySecureNote {
-			return provider.ReadResult{}, &provider.Error{Kind: provider.InvalidState}
+			return provider.ReadResult{}, &provider.Error{Kind: provider.InvalidState, Diagnostic: provider.UnsupportedContent}
 		}
 		return provider.ReadResult{Value: secret.New(item.Notes), Found: true}, nil
 	}
@@ -226,17 +244,20 @@ func readField(item *op.Item, key string, destination bool) (provider.ReadResult
 		}
 	}
 	if len(matches) == 0 {
-		return provider.ReadResult{}, nil
+		return provider.ReadResult{Diagnostic: provider.FieldNotFound}, nil
 	}
 	if len(matches) > 1 {
-		return provider.ReadResult{}, &provider.Error{Kind: provider.Ambiguous}
+		return provider.ReadResult{}, &provider.Error{Kind: provider.Ambiguous, Diagnostic: provider.AmbiguousField}
 	}
 	return provider.ReadResult{Value: secret.New(matches[0].Value), Found: true}, nil
 }
 
 func (a *Adapter) readDocument(ctx context.Context, item *op.Item) (provider.ReadResult, error) {
-	if item.Category != op.ItemCategoryDocument || item.Document == nil {
-		return provider.ReadResult{}, &provider.Error{Kind: provider.InvalidState}
+	if item.Category != op.ItemCategoryDocument {
+		return provider.ReadResult{}, &provider.Error{Kind: provider.InvalidState, Diagnostic: provider.UnsupportedContent}
+	}
+	if item.Document == nil {
+		return provider.ReadResult{Diagnostic: provider.FileNotFound}, nil
 	}
 	return a.readFile(ctx, item, *item.Document)
 }
@@ -255,10 +276,10 @@ func (a *Adapter) readAttachment(ctx context.Context, item *op.Item, selector st
 		}
 	}
 	if len(matches) == 0 {
-		return provider.ReadResult{}, nil
+		return provider.ReadResult{Diagnostic: provider.FileNotFound}, nil
 	}
 	if len(matches) > 1 {
-		return provider.ReadResult{}, &provider.Error{Kind: provider.Ambiguous}
+		return provider.ReadResult{}, &provider.Error{Kind: provider.Ambiguous, Diagnostic: provider.AmbiguousFile}
 	}
 	return a.readFile(ctx, item, matches[0])
 }
@@ -270,7 +291,7 @@ func (a *Adapter) readFile(ctx context.Context, item *op.Item, attributes op.Fil
 		return provider.ReadResult{}, remote(err)
 	}
 	if bytes.IndexByte(content, 0) >= 0 || !utf8.Valid(content) {
-		return provider.ReadResult{}, &provider.Error{Kind: provider.InvalidState}
+		return provider.ReadResult{}, &provider.Error{Kind: provider.InvalidState, Diagnostic: provider.UnsupportedContent}
 	}
 	return provider.ReadResult{Value: secret.NewBytes(content), Found: true}, nil
 }
@@ -297,10 +318,10 @@ func findSection(item *op.Item, title string) (*string, error) {
 		}
 	}
 	if len(ids) == 0 {
-		return nil, &provider.Error{Kind: provider.InvalidBinding}
+		return nil, &provider.Error{Kind: provider.InvalidBinding, Diagnostic: provider.SectionNotFound}
 	}
 	if len(ids) > 1 {
-		return nil, &provider.Error{Kind: provider.Ambiguous}
+		return nil, &provider.Error{Kind: provider.Ambiguous, Diagnostic: provider.AmbiguousSection}
 	}
 	return &ids[0], nil
 }

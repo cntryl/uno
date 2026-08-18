@@ -41,27 +41,46 @@ func (v *Vault) ReadMany(ctx context.Context, refs []provider.Reference) (map[st
 	if len(refs) == 0 {
 		return nil, nil
 	}
-	kv := v.Mount(refs[0].Region)
-	got, err := kv.Get(ctx, refs[0].Container)
+	got, missing, err := readContainer(ctx, v.Mount(refs[0].Region), refs[0].Container)
 	if err != nil {
-		return nil, remoteError(err)
+		return nil, err
+	}
+	if missing {
+		return provider.MissingResultsWithDiagnostic(refs, provider.SecretNotFound), nil
 	}
 	values := make(map[string]provider.ReadResult, len(refs))
 	fail := func(err error) (map[string]provider.ReadResult, error) {
 		provider.DestroyReadResults(values)
 		return nil, err
 	}
-	for _, ref := range refs {
+	for index, ref := range refs {
 		if ref.Region != refs[0].Region || ref.Container != refs[0].Container {
 			return fail(&provider.Error{Kind: provider.InvalidBinding})
 		}
 		result, err := decodeResult(got, ref.Key)
 		if err != nil {
-			return fail(err)
+			return fail(provider.ReadFailure(index, err))
 		}
 		values[ref.Binding()] = result
 	}
 	return values, nil
+}
+
+func readContainer(ctx context.Context, kv VaultAPI, path string) (*vaultapi.KVSecret, bool, error) {
+	got, err := kv.Get(ctx, path)
+	if errors.Is(err, vaultapi.ErrSecretNotFound) {
+		return nil, true, nil
+	}
+	if err != nil {
+		return nil, false, remoteError(err)
+	}
+	if got == nil {
+		return nil, false, &provider.Error{Kind: provider.InvalidState, Diagnostic: provider.InvalidResponse}
+	}
+	if got.Data == nil {
+		return nil, false, &provider.Error{Kind: provider.InvalidState, Diagnostic: provider.MalformedContainer}
+	}
+	return got, false, nil
 }
 
 // WriteMany merges every write into the secret's current document (like
@@ -95,16 +114,13 @@ func (v *Vault) WriteMany(ctx context.Context, writes []provider.Write) (provide
 	return provider.Receipt{}, &provider.Error{Kind: provider.Indeterminate}
 }
 func decodeResult(got *vaultapi.KVSecret, key string) (provider.ReadResult, error) {
-	if got == nil || got.Data == nil {
-		return provider.ReadResult{}, nil
-	}
 	raw, ok := got.Data[key]
 	if !ok {
-		return provider.ReadResult{}, nil
+		return provider.ReadResult{Diagnostic: provider.BindingNotFound}, nil
 	}
 	str, ok := raw.(string)
 	if !ok || raw == nil {
-		return provider.ReadResult{}, &provider.Error{Kind: provider.InvalidState}
+		return provider.ReadResult{}, &provider.Error{Kind: provider.InvalidState, Diagnostic: provider.UnsupportedContent}
 	}
 	return provider.ReadResult{Value: secret.New(str), Found: true}, nil
 }

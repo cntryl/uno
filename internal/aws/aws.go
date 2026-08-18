@@ -35,12 +35,18 @@ func (s *Secrets) ReadMany(ctx context.Context, refs []provider.Reference) (map[
 	out, err := s.C.GetSecretValue(ctx, &sm.GetSecretValueInput{SecretId: &refs[0].Container})
 	if err != nil {
 		if isMissing(err) {
-			return provider.MissingResults(refs), nil
+			return provider.MissingResultsWithDiagnostic(refs, provider.SecretNotFound), nil
 		}
 		return nil, remoteError(err)
 	}
+	if out == nil {
+		return nil, &provider.Error{Kind: provider.InvalidState, Diagnostic: provider.InvalidResponse}
+	}
 	if out.SecretString == nil {
-		return nil, &provider.Error{Kind: provider.InvalidState}
+		if out.SecretBinary != nil {
+			return nil, &provider.Error{Kind: provider.InvalidState, Diagnostic: provider.UnsupportedContent}
+		}
+		return nil, &provider.Error{Kind: provider.InvalidState, Diagnostic: provider.InvalidResponse}
 	}
 	return provider.ReadJSONDocument(refs, []byte(*out.SecretString))
 }
@@ -79,8 +85,9 @@ func (s *Secrets) Rollback(ctx context.Context, ref provider.Reference) error {
 func stringPtr(s string) *string { return &s }
 
 func isMissing(err error) bool {
-	var missing *smtypes.ResourceNotFoundException
-	return errors.As(err, &missing)
+	var missingSM *smtypes.ResourceNotFoundException
+	var missingSSM *ssmtypes.ParameterNotFound
+	return errors.As(err, &missingSM) || errors.As(err, &missingSSM)
 }
 func remoteError(err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

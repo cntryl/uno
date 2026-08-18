@@ -39,6 +39,7 @@ func runLimited(n int, task func(i int)) {
 type Mapping struct {
 	Environment         string
 	Source, Destination provider.Reference
+	Line                int
 }
 type Plan struct {
 	Mappings []Mapping
@@ -74,14 +75,14 @@ func bind(file *tpl.File, registry *provider.Registry, bindDestinations bool) (*
 			return nil, fmt.Errorf("line %d: invalid source reference: %s", entry.Line, provider.BindingDetail(err))
 		}
 		if !bindDestinations {
-			p.Mappings = append(p.Mappings, Mapping{Environment: entry.Key, Source: source})
+			p.Mappings = append(p.Mappings, Mapping{Environment: entry.Key, Source: source, Line: entry.Line})
 			continue
 		}
 		destination, err := registry.Parse(entry.Destination)
 		if err != nil {
 			return nil, fmt.Errorf("line %d: invalid destination reference: %s", entry.Line, provider.BindingDetail(err))
 		}
-		p.Mappings = append(p.Mappings, Mapping{entry.Key, source, destination})
+		p.Mappings = append(p.Mappings, Mapping{Environment: entry.Key, Source: source, Destination: destination, Line: entry.Line})
 		destinations = append(destinations, destination)
 	}
 	if err := provider.ValidateDestinations(destinations); err != nil {
@@ -151,7 +152,7 @@ func resolveGroup(ctx context.Context, adapters *adapterCache, group sourceGroup
 	got, err := adapter.ReadMany(ctx, refs)
 	if err != nil {
 		provider.DestroyReadResults(got)
-		return nil, safeOperationError("read", err)
+		return nil, safeOperationErrorAt("read", readErrorLine(err, refs, group.mappings), err)
 	}
 	if !validReadResults(got, refs, seen) {
 		provider.DestroyReadResults(got)
@@ -161,7 +162,11 @@ func resolveGroup(ctx context.Context, adapters *adapterCache, group sourceGroup
 		result := got[mapping.Source.Binding()]
 		if !result.Found {
 			provider.DestroyReadResults(got)
-			return nil, safeOperationError("read", &provider.Error{Kind: provider.InvalidBinding})
+			diagnostic := result.Diagnostic
+			if diagnostic == provider.NoDiagnostic {
+				diagnostic = provider.BindingNotFound
+			}
+			return nil, safeOperationErrorAt("read", mapping.Line, &provider.Error{Kind: provider.InvalidBinding, Diagnostic: diagnostic})
 		}
 		values[mapping.Environment] = result.Clone()
 	}
@@ -169,6 +174,20 @@ func resolveGroup(ctx context.Context, adapters *adapterCache, group sourceGroup
 	resultValues := values
 	values = nil
 	return resultValues, nil
+}
+
+func readErrorLine(err error, refs []provider.Reference, mappings []Mapping) int {
+	var indexed *provider.ReadError
+	if !errors.As(err, &indexed) || indexed.Index < 0 || indexed.Index >= len(refs) {
+		return 0
+	}
+	binding := refs[indexed.Index].Binding()
+	for _, mapping := range mappings {
+		if mapping.Source.Binding() == binding {
+			return mapping.Line
+		}
+	}
+	return 0
 }
 func sourceReferences(mappings []Mapping) ([]provider.Reference, map[string]bool) {
 	refs := make([]provider.Reference, 0, len(mappings))
@@ -406,18 +425,32 @@ func rollbackStatusForAll(environments []string, status RollbackStatus, detail s
 }
 
 func safeOperationError(op string, err error) error {
+	return safeOperationErrorAt(op, 0, err)
+}
+
+func safeOperationErrorAt(op string, line int, err error) error {
 	if cause := contextCause(err); cause != nil {
 		return cause
 	}
-	return fmt.Errorf("%s failed: %s", op, kind(err))
+	message := safeKind(op, err)
+	if line > 0 {
+		message = fmt.Sprintf("line %d: %s", line, message)
+	}
+	return errors.New(message)
 }
-func safeKind(op string, err error) string { return fmt.Sprintf("%s failed: %s", op, kind(err)) }
-func kind(err error) provider.ErrorKind {
+func safeKind(op string, err error) string {
+	kind, diagnostic := kindAndDiagnostic(err)
+	if message := diagnostic.Message(); message != "" {
+		return fmt.Sprintf("%s failed: %s (%s)", op, message, kind)
+	}
+	return fmt.Sprintf("%s failed: %s", op, kind)
+}
+func kindAndDiagnostic(err error) (provider.ErrorKind, provider.Diagnostic) {
 	var typed *provider.Error
 	if errors.As(err, &typed) {
-		return typed.Kind
+		return typed.Kind, typed.Diagnostic
 	}
-	return provider.Other
+	return provider.Other, provider.NoDiagnostic
 }
 
 func contextCause(err error) error {

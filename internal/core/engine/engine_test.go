@@ -68,15 +68,19 @@ func (f fakeFactory) Adapter(context.Context, provider.Reference) (provider.Adap
 }
 
 type fakeAdapter struct {
-	reads    []string
-	writes   [][]provider.Write
-	values   map[string]string
-	failRead string
-	result   func([]provider.Reference) map[string]secret.Value
+	reads      []string
+	writes     [][]provider.Write
+	values     map[string]string
+	failRead   string
+	result     func([]provider.Reference) map[string]secret.Value
+	readResult func([]provider.Reference) (map[string]provider.ReadResult, error)
 }
 
 func (f *fakeAdapter) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]provider.ReadResult, error) {
 	_ = ctx
+	if f.readResult != nil {
+		return f.readResult(refs)
+	}
 	if f.result != nil {
 		old := f.result(refs)
 		out := make(map[string]provider.ReadResult, len(old))
@@ -98,6 +102,74 @@ func (f *fakeAdapter) ReadMany(ctx context.Context, refs []provider.Reference) (
 		out[r.Binding()] = provider.ReadResult{Value: secret.New(f.values[r.Key]), Found: true}
 	}
 	return out, nil
+}
+
+func TestShouldReportTemplateLineAndFixedDiagnosticGivenMissingSourceBinding(t *testing.T) {
+	adapter := &fakeAdapter{readResult: func(refs []provider.Reference) (map[string]provider.ReadResult, error) {
+		return map[string]provider.ReadResult{
+			refs[0].Binding(): {Diagnostic: provider.BindingNotFound},
+		}, nil
+	}}
+	p := planFor(t, "# heading\n\nMY_API_KEY=fake://s/missing -> fake://d/value\n", adapter)
+
+	_, err := Resolve(context.Background(), p)
+
+	const want = "line 3: read failed: source field not found in provider container (InvalidBinding)"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err=%v want=%q", err, want)
+	}
+}
+
+func TestShouldUseReadIndexWithoutExposingReferenceSpecificFailureData(t *testing.T) {
+	adapter := &fakeAdapter{readResult: func([]provider.Reference) (map[string]provider.ReadResult, error) {
+		return nil, provider.ReadFailure(1, &provider.Error{
+			Kind:       provider.Ambiguous,
+			Diagnostic: provider.AmbiguousField,
+			Detail:     "CANARY_PROVIDER_ERROR sdk-object CANARY_FIELD",
+		})
+	}}
+	p := planFor(t, "FIRST=fake://s/first -> fake://d/first\n\nSECOND=fake://s/CANARY_REFERENCE -> fake://d/second\n", adapter)
+
+	_, err := Resolve(context.Background(), p)
+
+	const want = "line 3: read failed: source field is ambiguous in provider container (Ambiguous)"
+	if err == nil || err.Error() != want || stringsContains(err.Error(), "CANARY") || stringsContains(err.Error(), "sdk-object") {
+		t.Fatalf("err=%v want=%q", err, want)
+	}
+}
+
+func TestShouldNotReportLineGivenGroupWideMalformedContainer(t *testing.T) {
+	adapter := &fakeAdapter{readResult: func([]provider.Reference) (map[string]provider.ReadResult, error) {
+		return nil, &provider.Error{Kind: provider.InvalidState, Diagnostic: provider.MalformedContainer, Detail: "CANARY_VALUE"}
+	}}
+	p := planFor(t, "MY_API_KEY=fake://s/a -> fake://d/a\n", adapter)
+
+	_, err := Resolve(context.Background(), p)
+
+	const want = "read failed: provider container contents are malformed (InvalidState)"
+	if err == nil || err.Error() != want || stringsContains(err.Error(), "line ") || stringsContains(err.Error(), "CANARY") {
+		t.Fatalf("err=%v want=%q", err, want)
+	}
+}
+
+func TestShouldDestroyPartiallyResolvedResultsAndSkipWritesGivenLaterMissingSource(t *testing.T) {
+	resolved := secret.New("CANARY_RESOLVED_VALUE")
+	adapter := &fakeAdapter{readResult: func(refs []provider.Reference) (map[string]provider.ReadResult, error) {
+		return map[string]provider.ReadResult{
+			refs[0].Binding(): {Value: resolved, Found: true},
+			refs[1].Binding(): {Diagnostic: provider.BindingNotFound},
+		}, nil
+	}}
+	p := planFor(t, "FIRST=fake://s/first -> fake://d/first\nSECOND=fake://s/second -> fake://d/second\n", adapter)
+
+	_, err := Sync(context.Background(), p, SyncOptions{})
+
+	if err == nil || len(adapter.writes) != 0 {
+		t.Fatalf("writes=%v err=%v", adapter.writes, err)
+	}
+	if got := resolved.Reveal(); got != string(make([]byte, len("CANARY_RESOLVED_VALUE"))) {
+		t.Fatalf("resolved source was not destroyed: %q", got)
+	}
 }
 
 func TestShouldReturnValuesKeyedByBindingGivenDuplicateSourceReferences(t *testing.T) {

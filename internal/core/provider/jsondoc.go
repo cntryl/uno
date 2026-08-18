@@ -27,7 +27,7 @@ func ReadJSONDocument(refs []Reference, raw []byte) (map[string]ReadResult, erro
 	}
 	doc := map[string]json.RawMessage{}
 	parsed := false
-	for _, ref := range refs {
+	for index, ref := range refs {
 		if ref.Blob() {
 			values[ref.Binding()] = ReadResult{Value: secret.New(string(raw)), Found: true}
 			continue
@@ -39,21 +39,21 @@ func ReadJSONDocument(refs []Reference, raw []byte) (map[string]ReadResult, erro
 			// doesn't panic, so without this check every key would silently
 			// report "not found" instead of surfacing the real corruption.
 			if json.Unmarshal(raw, &doc) != nil || doc == nil {
-				return fail(&Error{Kind: InvalidState})
+				return fail(&Error{Kind: InvalidState, Diagnostic: MalformedContainer})
 			}
 			parsed = true
 		}
 		rawValue, ok := doc[ref.Key]
 		if !ok {
-			values[ref.Binding()] = ReadResult{}
+			values[ref.Binding()] = ReadResult{Diagnostic: BindingNotFound}
 			continue
 		}
 		if string(rawValue) == "null" {
-			return fail(&Error{Kind: InvalidState})
+			return fail(ReadFailure(index, &Error{Kind: InvalidState, Diagnostic: UnsupportedContent}))
 		}
 		var value string
 		if json.Unmarshal(rawValue, &value) != nil {
-			return fail(&Error{Kind: InvalidState})
+			return fail(ReadFailure(index, &Error{Kind: InvalidState, Diagnostic: UnsupportedContent}))
 		}
 		values[ref.Binding()] = ReadResult{Value: secret.New(value), Found: true}
 	}

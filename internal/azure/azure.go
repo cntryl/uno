@@ -55,12 +55,12 @@ func (a *KeyVault) ReadMany(ctx context.Context, refs []provider.Reference) (map
 	if err != nil {
 		var responseError *azcore.ResponseError
 		if errors.As(err, &responseError) && responseError.StatusCode == http.StatusNotFound {
-			return provider.MissingResults(refs), nil
+			return provider.MissingResultsWithDiagnostic(refs, provider.SecretNotFound), nil
 		}
 		return nil, remoteError(err)
 	}
 	if response.Value == nil {
-		return nil, &provider.Error{Kind: provider.InvalidState}
+		return nil, &provider.Error{Kind: provider.InvalidState, Diagnostic: provider.InvalidResponse}
 	}
 	return provider.ReadJSONDocument(refs, []byte(*response.Value))
 }

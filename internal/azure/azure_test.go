@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,6 +68,25 @@ func TestReadManyRejectsUnsafeValuesAndMixedContainers(t *testing.T) {
 	r2.Container = "other"
 	if _, err := (&KeyVault{C: f}).ReadMany(context.Background(), []provider.Reference{ref(""), r2}); err == nil {
 		t.Fatal("expected mixed container error")
+	}
+}
+
+func TestReadManyClassifiesMissingAndIncompleteSecrets(t *testing.T) {
+	missingClient := &fakeClient{get: func(context.Context, string, string) (azsecrets.GetSecretResponse, error) {
+		return azsecrets.GetSecretResponse{}, &azcore.ResponseError{StatusCode: http.StatusNotFound, ErrorCode: "CANARY_SDK_ERROR"}
+	}}
+	missing, err := (&KeyVault{C: missingClient}).ReadMany(context.Background(), []provider.Reference{ref("a")})
+	if err != nil || missing[ref("a").Binding()].Found || missing[ref("a").Binding()].Diagnostic != provider.SecretNotFound {
+		t.Fatalf("missing=%v err=%v", missing, err)
+	}
+
+	incompleteClient := &fakeClient{get: func(context.Context, string, string) (azsecrets.GetSecretResponse, error) {
+		return azsecrets.GetSecretResponse{}, nil
+	}}
+	_, err = (&KeyVault{C: incompleteClient}).ReadMany(context.Background(), []provider.Reference{ref("a")})
+	var typed *provider.Error
+	if !errors.As(err, &typed) || typed.Kind != provider.InvalidState || typed.Diagnostic != provider.InvalidResponse || strings.Contains(err.Error(), "CANARY") {
+		t.Fatalf("incomplete err=%v", err)
 	}
 }
 

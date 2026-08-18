@@ -74,6 +74,7 @@ type cliAdapter struct {
 	readBatchSizes                     []int
 	value                              string
 	read                               func(context.Context, []provider.Reference) (map[string]secret.Value, error)
+	readResults                        func([]provider.Reference) (map[string]provider.ReadResult, error)
 	write                              func(context.Context, []provider.Write) (provider.Receipt, error)
 }
 
@@ -88,6 +89,9 @@ type cliAdapter struct {
 // gets attempted" assumption true without each needing to seed a fake store.
 func (a *cliAdapter) ReadMany(ctx context.Context, refs []provider.Reference) (map[string]provider.ReadResult, error) {
 	a.readBatchSizes = append(a.readBatchSizes, len(refs))
+	if a.readResults != nil {
+		return a.readResults(refs)
+	}
 	if a.read != nil {
 		old, err := a.read(ctx, refs)
 		out := make(map[string]provider.ReadResult, len(old))
@@ -110,6 +114,51 @@ func (a *cliAdapter) ReadMany(ctx context.Context, refs []provider.Reference) (m
 		out[r.Binding()] = provider.ReadResult{Value: secret.New(value), Found: true}
 	}
 	return out, nil
+}
+
+func TestShouldLeaveSecretsFileAbsentOrUnchangedGivenMissingDevSource(t *testing.T) {
+	t.Run("absent", func(t *testing.T) { testMissingDevSource(t, "") })
+	t.Run("existing", func(t *testing.T) { testMissingDevSource(t, "MY_API_KEY=existing-value\n") })
+}
+
+func testMissingDevSource(t *testing.T, existing string) {
+	t.Helper()
+	directory := t.TempDir()
+	initDevRepo(t, directory)
+	if existing != "" {
+		if err := os.WriteFile(".env.secrets", []byte(existing), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(directory, "template")
+	if err := os.WriteFile(path, []byte("# local development\n\nMY_API_KEY=fake://CANARY_REFERENCE -> fake://destination\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &cliAdapter{readResults: func(refs []provider.Reference) (map[string]provider.ReadResult, error) {
+		return map[string]provider.ReadResult{refs[0].Binding(): {Diagnostic: provider.SecretNotFound}}, nil
+	}}
+
+	_, _, err := run([]string{"--template", path, "dev"}, cliRegistry(adapter))
+
+	const want = "line 3: read failed: source secret not found in provider (InvalidBinding)"
+	if err == nil || err.Error() != want || strings.Contains(err.Error(), "CANARY") || strings.Contains(err.Error(), "MY_API_KEY") {
+		t.Fatalf("err=%v want=%q", err, want)
+	}
+	assertSecretsFile(t, existing)
+	if adapter.writes != 0 {
+		t.Fatalf("writes=%d", adapter.writes)
+	}
+}
+
+func assertSecretsFile(t *testing.T, existing string) {
+	t.Helper()
+	contents, err := os.ReadFile(".env.secrets")
+	if existing == "" && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read err=%v contents=%q", err, contents)
+	}
+	if existing != "" && (err != nil || string(contents) != existing) {
+		t.Fatalf("read err=%v contents=%q", err, contents)
+	}
 }
 
 func TestShouldReturnInvalidArgumentsErrorGivenNonPositiveTimeout(t *testing.T) {

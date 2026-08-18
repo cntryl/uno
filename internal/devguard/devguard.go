@@ -23,8 +23,11 @@ func Check(ctx context.Context, directory string) error {
 	if err := inspectSecretsFile(directory); err != nil {
 		return err
 	}
-	if !gitIgnored(ctx, git, directory, secretsFile) || !gitIgnored(ctx, git, directory, secretsFile+"-probe") {
-		return fmt.Errorf("dev requires .env.secrets and .env.secrets-* to be effectively ignored by Git")
+	if !gitIgnored(ctx, git, directory, secretsFile) {
+		return fmt.Errorf(`dev safety check failed: Git does not effectively ignore .env.secrets; add ".env.secrets*" to .gitignore after any conflicting negation rules`)
+	}
+	if !gitIgnored(ctx, git, directory, secretsFile+"-probe") {
+		return fmt.Errorf(`dev safety check failed: Git does not effectively ignore .env.secrets-*; add ".env.secrets*" to .gitignore after any conflicting negation rules`)
 	}
 	// #nosec G204 -- arguments are passed directly to Git without a shell.
 	tracked := exec.CommandContext(ctx, git, "-C", directory, "ls-files", "--error-unmatch", "--", secretsFile)
@@ -44,13 +47,20 @@ func inspectSecretsFile(directory string) error {
 	return nil
 }
 func checkDockerIgnores(directory string) error {
-	files, err := dockerIgnoreFiles(directory)
+	contexts, err := dockerIgnoreFiles(directory)
 	if err != nil {
 		return fmt.Errorf("could not inspect development directory")
 	}
-	for _, path := range files {
-		if !finalRuleIgnores(path, secretsFile) || !finalRuleIgnores(path, secretsFile+"-probe") {
-			return fmt.Errorf("dev requires every applicable Docker ignore file to protect .env.secrets and .env.secrets-*")
+	for _, dockerContext := range contexts {
+		if _, err := os.Stat(dockerContext.ignorePath); os.IsNotExist(err) {
+			return fmt.Errorf(`dev safety check failed: %s uses %s, but %s does not exist; create it with ".env.secrets*" as its final active rule`, dockerContext.dockerfile, dockerContext.ignoreName, dockerContext.ignoreName)
+		}
+		last, err := finalActiveRule(dockerContext.ignorePath)
+		if err != nil {
+			return fmt.Errorf("dev safety check failed: could not read %s", dockerContext.ignoreName)
+		}
+		if !ruleIgnores(last, secretsFile) || !ruleIgnores(last, secretsFile+"-probe") {
+			return fmt.Errorf(`dev safety check failed: %s does not protect .env.secrets and .env.secrets-*; make ".env.secrets*" its final active rule`, dockerContext.ignoreName)
 		}
 	}
 	return nil
@@ -61,10 +71,10 @@ func gitIgnored(ctx context.Context, git, directory, name string) bool {
 	cmd := exec.CommandContext(ctx, git, "-C", directory, "check-ignore", "-q", "--", name)
 	return cmd.Run() == nil
 }
-func finalRuleIgnores(path, target string) bool {
+func finalActiveRule(path string) (string, error) {
 	contents, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
-		return false
+		return "", err
 	}
 	last := ""
 	for _, raw := range strings.Split(string(contents), "\n") {
@@ -74,28 +84,40 @@ func finalRuleIgnores(path, target string) bool {
 		}
 		last = line
 	}
-	return last == target || last == "/"+target || last == secretsFile+"*" || last == "/"+secretsFile+"*"
+	return last, nil
 }
 
-func dockerIgnoreFiles(directory string) ([]string, error) {
+func ruleIgnores(rule, target string) bool {
+	return rule == target || rule == "/"+target || rule == secretsFile+"*" || rule == "/"+secretsFile+"*"
+}
+
+type dockerContext struct {
+	dockerfile string
+	ignoreName string
+	ignorePath string
+}
+
+func dockerIgnoreFiles(directory string) ([]dockerContext, error) {
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		return nil, err
 	}
 	seen := map[string]bool{}
-	paths := []string{}
+	contexts := []dockerContext{}
 	for _, entry := range entries {
 		name := entry.Name()
 		if !entry.IsDir() && (name == "Dockerfile" || strings.HasPrefix(name, "Dockerfile.")) {
-			path := filepath.Join(directory, name+".dockerignore")
+			ignoreName := name + ".dockerignore"
+			path := filepath.Join(directory, ignoreName)
 			if _, err := os.Stat(path); os.IsNotExist(err) {
-				path = filepath.Join(directory, ".dockerignore")
+				ignoreName = ".dockerignore"
+				path = filepath.Join(directory, ignoreName)
 			}
 			if !seen[path] {
 				seen[path] = true
-				paths = append(paths, path)
+				contexts = append(contexts, dockerContext{dockerfile: name, ignoreName: ignoreName, ignorePath: path})
 			}
 		}
 	}
-	return paths, nil
+	return contexts, nil
 }

@@ -10,6 +10,17 @@ import (
 	"github.com/cntryl/uno/internal/core/secret"
 )
 
+func TestEverySafeDiagnosticHasAFixedMessage(t *testing.T) {
+	if NoDiagnostic.Message() != "" || diagnosticCount.Message() != "" || Diagnostic(255).Message() != "" {
+		t.Fatal("non-diagnostic values must not produce messages")
+	}
+	for diagnostic := SecretNotFound; diagnostic < diagnosticCount; diagnostic++ {
+		if diagnostic.Message() == "" {
+			t.Fatalf("diagnostic %d has no fixed message", diagnostic)
+		}
+	}
+}
+
 func TestShouldPreserveUnwrittenSiblingsGivenKeyedMerge(t *testing.T) {
 	property := func(siblings map[string]string, replacement string) bool {
 		delete(siblings, "__uno_target__")
@@ -83,6 +94,9 @@ func TestShouldReadBlobAndKeyedValuesGivenSharedDocument(t *testing.T) {
 	if values[refs[2].Binding()].Found {
 		t.Fatalf("absent key reported found: %v", values[refs[2].Binding()])
 	}
+	if values[refs[2].Binding()].Diagnostic != BindingNotFound {
+		t.Fatalf("absent key diagnostic=%v", values[refs[2].Binding()].Diagnostic)
+	}
 }
 
 func TestShouldFailReadGivenNullOrMalformedValue(t *testing.T) {
@@ -95,5 +109,22 @@ func TestShouldFailReadGivenNullOrMalformedValue(t *testing.T) {
 		if _, err := ReadJSONDocument([]Reference{ref}, raw); err == nil {
 			t.Fatalf("%s: expected error", name)
 		}
+	}
+}
+
+func TestShouldClassifyMalformedDocumentSeparatelyFromUnsupportedFieldContent(t *testing.T) {
+	ref := Reference{Scheme: "x", Container: "c", Key: "a"}
+
+	_, malformedErr := ReadJSONDocument([]Reference{ref}, []byte("not json"))
+	var malformed *Error
+	if !errors.As(malformedErr, &malformed) || malformed.Kind != InvalidState || malformed.Diagnostic != MalformedContainer {
+		t.Fatalf("malformed err=%v", malformedErr)
+	}
+
+	_, contentErr := ReadJSONDocument([]Reference{ref}, []byte(`{"a":42}`))
+	var indexed *ReadError
+	var content *Error
+	if !errors.As(contentErr, &indexed) || indexed.Index != 0 || !errors.As(contentErr, &content) || content.Kind != InvalidState || content.Diagnostic != UnsupportedContent {
+		t.Fatalf("content err=%v", contentErr)
 	}
 }

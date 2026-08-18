@@ -2,6 +2,7 @@ package aws
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -31,15 +32,19 @@ func (s *SSM) ReadMany(ctx context.Context, refs []provider.Reference) (map[stri
 		return nil, &provider.Error{Kind: provider.InvalidBinding}
 	}
 	values := make(map[string]provider.ReadResult, len(refs))
-	for _, ref := range refs {
+	for index, ref := range refs {
 		value, err := s.read(ctx, ref)
 		if err != nil {
 			if isMissing(err) {
-				values[ref.Binding()] = provider.ReadResult{}
+				values[ref.Binding()] = provider.ReadResult{Diagnostic: provider.SecretNotFound}
 				continue
 			}
 			provider.DestroyReadResults(values)
-			return nil, err
+			var typed *provider.Error
+			if errors.As(err, &typed) && typed.Diagnostic == provider.InvalidResponse {
+				return nil, provider.ReadFailure(index, err)
+			}
+			return nil, remoteError(err)
 		}
 		values[ref.Binding()] = provider.ReadResult{Value: value, Found: true}
 	}
@@ -50,10 +55,10 @@ func (s *SSM) read(ctx context.Context, ref provider.Reference) (secret.Value, e
 	decrypt := true
 	out, err := s.C.GetParameter(ctx, &ssm.GetParameterInput{Name: &ref.Container, WithDecryption: &decrypt})
 	if err != nil {
-		return secret.Value{}, remoteError(err)
+		return secret.Value{}, err
 	}
-	if out.Parameter == nil || out.Parameter.Value == nil || out.Parameter.Type != ssmtypes.ParameterTypeSecureString {
-		return secret.Value{}, &provider.Error{Kind: provider.InvalidState}
+	if out == nil || out.Parameter == nil || out.Parameter.Value == nil || out.Parameter.Type != ssmtypes.ParameterTypeSecureString {
+		return secret.Value{}, &provider.Error{Kind: provider.InvalidState, Diagnostic: provider.InvalidResponse}
 	}
 	return secret.New(*out.Parameter.Value), nil
 }

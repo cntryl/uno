@@ -59,10 +59,12 @@ func FuzzParseReference(f *testing.F) {
 }
 
 type fakeSecrets struct {
-	value         *string
-	puts, creates int
-	last          string
-	exists        bool
+	value           *string
+	puts, creates   int
+	last            string
+	exists          bool
+	nilReadResponse bool
+	binary          []byte
 }
 
 type promotionFake struct {
@@ -297,11 +299,52 @@ func TestShouldRebaseGivenConcurrentSiblingUpdate(t *testing.T) {
 // below still covers the AWS-specific WriteMany path end-to-end.
 
 func (f *fakeSecrets) GetSecretValue(context.Context, *sm.GetSecretValueInput, ...func(*sm.Options)) (*sm.GetSecretValueOutput, error) {
+	if f.nilReadResponse {
+		return nil, nil
+	}
+	if f.binary != nil {
+		return &sm.GetSecretValueOutput{SecretBinary: f.binary}, nil
+	}
 	if f.value == nil {
 		return nil, &smtypes.ResourceNotFoundException{}
 	}
 	version := "current"
 	return &sm.GetSecretValueOutput{SecretString: f.value, VersionId: &version}, nil
+}
+
+func TestShouldClassifySecretsManagerReadDiagnostics(t *testing.T) {
+	ref := provider.Reference{Container: "secret", Key: "key"}
+
+	missing, err := (&Secrets{C: &fakeSecrets{}}).ReadMany(context.Background(), []provider.Reference{ref})
+	assertMissingRead(t, missing, ref, provider.SecretNotFound, err)
+
+	empty := "{}"
+	keyed, err := (&Secrets{C: &fakeSecrets{value: &empty}}).ReadMany(context.Background(), []provider.Reference{ref})
+	assertMissingRead(t, keyed, ref, provider.BindingNotFound, err)
+
+	_, err = (&Secrets{C: &fakeSecrets{nilReadResponse: true}}).ReadMany(context.Background(), []provider.Reference{ref})
+	assertProviderError(t, err, provider.InvalidState, provider.InvalidResponse)
+
+	_, err = (&Secrets{C: &fakeSecrets{binary: []byte("CANARY_BINARY")}}).ReadMany(context.Background(), []provider.Reference{ref})
+	assertProviderError(t, err, provider.InvalidState, provider.UnsupportedContent)
+	if strings.Contains(err.Error(), "CANARY") {
+		t.Fatalf("binary err=%v", err)
+	}
+}
+
+func assertMissingRead(t *testing.T, values map[string]provider.ReadResult, ref provider.Reference, diagnostic provider.Diagnostic, err error) {
+	t.Helper()
+	if err != nil || values[ref.Binding()].Found || values[ref.Binding()].Diagnostic != diagnostic {
+		t.Fatalf("values=%v diagnostic=%v err=%v", values, diagnostic, err)
+	}
+}
+
+func assertProviderError(t *testing.T, err error, kind provider.ErrorKind, diagnostic provider.Diagnostic) {
+	t.Helper()
+	var typed *provider.Error
+	if !errors.As(err, &typed) || typed.Kind != kind || typed.Diagnostic != diagnostic {
+		t.Fatalf("err=%v kind=%v diagnostic=%v", err, kind, diagnostic)
+	}
 }
 func (f *fakeSecrets) CreateSecret(_ context.Context, in *sm.CreateSecretInput, _ ...func(*sm.Options)) (*sm.CreateSecretOutput, error) {
 	f.creates++
@@ -371,14 +414,33 @@ type fakeSSM struct {
 	// parameter name fail permanently (simulating a non-transient error),
 	// regardless of how many times SSM.write retries it.
 	failContainer string
+	invalidRead   bool
 }
 
 func (f *fakeSSM) GetParameter(_ context.Context, in *ssm.GetParameterInput, _ ...func(*ssm.Options)) (*ssm.GetParameterOutput, error) {
+	if f.invalidRead {
+		return &ssm.GetParameterOutput{}, nil
+	}
 	value, ok := f.values[*in.Name]
 	if !ok {
 		return nil, &ssmtypes.ParameterNotFound{}
 	}
 	return &ssm.GetParameterOutput{Parameter: &ssmtypes.Parameter{Name: in.Name, Value: &value, Type: ssmtypes.ParameterTypeSecureString}}, nil
+}
+
+func TestShouldClassifySSMReadDiagnostics(t *testing.T) {
+	ref := provider.Reference{Container: "/source"}
+	missing, err := (&SSM{C: &fakeSSM{}}).ReadMany(context.Background(), []provider.Reference{ref})
+	if err != nil || missing[ref.Binding()].Found || missing[ref.Binding()].Diagnostic != provider.SecretNotFound {
+		t.Fatalf("missing=%v err=%v", missing, err)
+	}
+
+	_, err = (&SSM{C: &fakeSSM{invalidRead: true}}).ReadMany(context.Background(), []provider.Reference{ref})
+	var indexed *provider.ReadError
+	var typed *provider.Error
+	if !errors.As(err, &indexed) || indexed.Index != 0 || !errors.As(err, &typed) || typed.Kind != provider.InvalidState || typed.Diagnostic != provider.InvalidResponse {
+		t.Fatalf("invalid response err=%v", err)
+	}
 }
 func (f *fakeSSM) PutParameter(_ context.Context, in *ssm.PutParameterInput, _ ...func(*ssm.Options)) (*ssm.PutParameterOutput, error) {
 	f.names = append(f.names, *in.Name)

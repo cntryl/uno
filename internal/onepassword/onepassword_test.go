@@ -28,6 +28,9 @@ type fakeAPI struct {
 	fileContents   map[string][]byte
 	fileReads      []string
 	fileErr        error
+	vaultErr       error
+	itemListErr    error
+	itemGetErr     error
 }
 
 type fakeVersionConflictError struct{}
@@ -37,15 +40,15 @@ func (fakeVersionConflictError) VersionConflict() bool { return true }
 
 func (f *fakeAPI) ListVaults(context.Context) ([]op.VaultOverview, error) {
 	f.vaultLists++
-	return f.vaults, nil
+	return f.vaults, f.vaultErr
 }
 func (f *fakeAPI) ListItems(context.Context, string) ([]op.ItemOverview, error) {
 	f.itemLists++
-	return f.items, nil
+	return f.items, f.itemListErr
 }
 func (f *fakeAPI) GetItem(context.Context, string, string) (op.Item, error) {
 	f.itemGets++
-	return f.item, nil
+	return f.item, f.itemGetErr
 }
 func (f *fakeAPI) ReadFile(_ context.Context, _, _ string, attributes op.FileAttributes) ([]byte, error) {
 	f.fileReads = append(f.fileReads, attributes.ID)
@@ -235,6 +238,80 @@ func TestShouldReadConcealedFieldGivenAPICredentialItem(t *testing.T) {
 	}
 }
 
+func TestShouldClassifyVaultAndItemLookupDiagnostics(t *testing.T) {
+	ref := provider.Reference{Scheme: "op", Region: "Production", Container: "service", Key: "FIELD"}
+
+	missingVault := baseFake()
+	missingVault.vaults = nil
+	_, err := NewWithAPI(missingVault).ReadMany(context.Background(), []provider.Reference{ref})
+	assertDiagnostic(t, err, provider.InvalidBinding, provider.SecretNotFound, -1)
+
+	ambiguousVault := baseFake()
+	ambiguousVault.vaults = append(ambiguousVault.vaults, op.VaultOverview{ID: "v2", Title: "Production"})
+	_, err = NewWithAPI(ambiguousVault).ReadMany(context.Background(), []provider.Reference{ref})
+	assertDiagnostic(t, err, provider.Ambiguous, provider.AmbiguousContainer, -1)
+
+	missingItem := baseFake()
+	missingItem.items = nil
+	values, err := NewWithAPI(missingItem).ReadMany(context.Background(), []provider.Reference{ref})
+	if err != nil || values[ref.Binding()].Found || values[ref.Binding()].Diagnostic != provider.SecretNotFound {
+		t.Fatalf("missing item values=%v err=%v", values, err)
+	}
+
+	ambiguousItem := baseFake()
+	ambiguousItem.items = append(ambiguousItem.items, op.ItemOverview{ID: "i2", Title: "service"})
+	_, err = NewWithAPI(ambiguousItem).ReadMany(context.Background(), []provider.Reference{ref})
+	assertDiagnostic(t, err, provider.Ambiguous, provider.AmbiguousContainer, -1)
+
+	incompleteItem := baseFake()
+	incompleteItem.item.ID = ""
+	_, err = NewWithAPI(incompleteItem).ReadMany(context.Background(), []provider.Reference{ref})
+	assertDiagnostic(t, err, provider.InvalidState, provider.InvalidResponse, -1)
+}
+
+func TestShouldClassifySectionAndFieldDiagnostics(t *testing.T) {
+	missingSection := baseFake()
+	missingSection.item.Sections = nil
+	ref := provider.Reference{Scheme: "op", Region: "Production", Container: "service", Key: "path1/path2/FIELD"}
+	_, err := NewWithAPI(missingSection).ReadMany(context.Background(), []provider.Reference{ref})
+	assertDiagnostic(t, err, provider.InvalidBinding, provider.SectionNotFound, 0)
+
+	ambiguousSection := baseFake()
+	ambiguousSection.item.Sections = append(ambiguousSection.item.Sections, op.ItemSection{ID: "section-2", Title: "path1/path2"})
+	_, err = NewWithAPI(ambiguousSection).ReadMany(context.Background(), []provider.Reference{ref})
+	assertDiagnostic(t, err, provider.Ambiguous, provider.AmbiguousSection, 0)
+
+	missingField := baseFake()
+	missingField.item.Fields = nil
+	values, err := NewWithAPI(missingField).ReadMany(context.Background(), []provider.Reference{ref})
+	if err != nil || values[ref.Binding()].Found || values[ref.Binding()].Diagnostic != provider.FieldNotFound {
+		t.Fatalf("missing field values=%v err=%v", values, err)
+	}
+
+	ambiguousField := baseFake()
+	ambiguousField.item.Fields = append(ambiguousField.item.Fields, ambiguousField.item.Fields[1])
+	_, err = NewWithAPI(ambiguousField).ReadMany(context.Background(), []provider.Reference{ref})
+	assertDiagnostic(t, err, provider.Ambiguous, provider.AmbiguousField, 0)
+}
+
+func assertDiagnostic(t *testing.T, err error, kind provider.ErrorKind, diagnostic provider.Diagnostic, readIndex int) {
+	t.Helper()
+	var typed *provider.Error
+	if !errors.As(err, &typed) || typed.Kind != kind || typed.Diagnostic != diagnostic {
+		t.Fatalf("err=%v kind=%v diagnostic=%v", err, kind, diagnostic)
+	}
+	var indexed *provider.ReadError
+	if readIndex < 0 {
+		if errors.As(err, &indexed) {
+			t.Fatalf("unexpected read index=%d err=%v", indexed.Index, err)
+		}
+		return
+	}
+	if !errors.As(err, &indexed) || indexed.Index != readIndex {
+		t.Fatalf("read index=%v want=%d err=%v", indexed, readIndex, err)
+	}
+}
+
 func TestShouldReadTextFieldGivenAPICredentialItem(t *testing.T) {
 	fake := baseFake()
 	fake.item.Category = op.ItemCategoryAPICredentials
@@ -330,7 +407,8 @@ func TestShouldRejectAndDestroyNonTextDocumentContent(t *testing.T) {
 
 			_, err := NewWithAPI(fake).ReadMany(context.Background(), []provider.Reference{ref})
 			var typed *provider.Error
-			if !errors.As(err, &typed) || typed.Kind != provider.InvalidState {
+			var indexed *provider.ReadError
+			if !errors.As(err, &typed) || typed.Kind != provider.InvalidState || typed.Diagnostic != provider.UnsupportedContent || !errors.As(err, &indexed) || indexed.Index != 0 {
 				t.Fatalf("err=%v", err)
 			}
 			if !bytes.Equal(content, make([]byte, len(content))) {
@@ -364,7 +442,7 @@ func TestShouldFailClosedGivenAmbiguousAttachment(t *testing.T) {
 
 	_, err := NewWithAPI(fake).ReadMany(context.Background(), []provider.Reference{ref})
 	var typed *provider.Error
-	if !errors.As(err, &typed) || typed.Kind != provider.Ambiguous || len(fake.fileReads) != 0 {
+	if !errors.As(err, &typed) || typed.Kind != provider.Ambiguous || typed.Diagnostic != provider.AmbiguousFile || len(fake.fileReads) != 0 {
 		t.Fatalf("file reads=%v err=%v", fake.fileReads, err)
 	}
 }
@@ -375,7 +453,7 @@ func TestShouldReportMissingGivenUnknownAttachment(t *testing.T) {
 
 	values, err := NewWithAPI(fake).ReadMany(context.Background(), []provider.Reference{ref})
 	defer provider.DestroyReadResults(values)
-	if err != nil || values[ref.Binding()].Found || len(fake.fileReads) != 0 {
+	if err != nil || values[ref.Binding()].Found || values[ref.Binding()].Diagnostic != provider.FileNotFound || len(fake.fileReads) != 0 {
 		t.Fatalf("result=%v file reads=%v err=%v", values[ref.Binding()].Found, fake.fileReads, err)
 	}
 }
@@ -386,8 +464,20 @@ func TestShouldRejectDocumentSelectorGivenNonDocumentItem(t *testing.T) {
 
 	_, err := NewWithAPI(fake).ReadMany(context.Background(), []provider.Reference{ref})
 	var typed *provider.Error
-	if !errors.As(err, &typed) || typed.Kind != provider.InvalidState || len(fake.fileReads) != 0 {
+	if !errors.As(err, &typed) || typed.Kind != provider.InvalidState || typed.Diagnostic != provider.UnsupportedContent || len(fake.fileReads) != 0 {
 		t.Fatalf("file reads=%v err=%v", fake.fileReads, err)
+	}
+}
+
+func TestShouldReportMissingDocumentGivenDocumentItemWithoutContent(t *testing.T) {
+	fake := baseFake()
+	fake.item.Category = op.ItemCategoryDocument
+	fake.item.Document = nil
+	ref := provider.Reference{Scheme: "op", Region: "Production", Container: "service", Key: "?document"}
+
+	values, err := NewWithAPI(fake).ReadMany(context.Background(), []provider.Reference{ref})
+	if err != nil || values[ref.Binding()].Found || values[ref.Binding()].Diagnostic != provider.FileNotFound || len(fake.fileReads) != 0 {
+		t.Fatalf("values=%v file reads=%v err=%v", values, fake.fileReads, err)
 	}
 }
 
@@ -476,7 +566,7 @@ func TestShouldRejectBodyReadGivenNonSecureNoteItem(t *testing.T) {
 
 	_, err := NewWithAPI(fake).ReadMany(context.Background(), []provider.Reference{ref})
 	var typed *provider.Error
-	if !errors.As(err, &typed) || typed.Kind != provider.InvalidState {
+	if !errors.As(err, &typed) || typed.Kind != provider.InvalidState || typed.Diagnostic != provider.UnsupportedContent {
 		t.Fatalf("err=%v", err)
 	}
 }

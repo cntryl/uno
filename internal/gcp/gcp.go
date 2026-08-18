@@ -40,12 +40,12 @@ func (s *SecretManager) ReadMany(ctx context.Context, refs []provider.Reference)
 	out, err := s.C.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{Name: secretName(refs[0]) + "/versions/latest"})
 	if err != nil {
 		if isNotFound(err) {
-			return provider.MissingResults(refs), nil
+			return provider.MissingResultsWithDiagnostic(refs, provider.SecretNotFound), nil
 		}
 		return nil, remoteError(err)
 	}
 	if out.GetPayload() == nil {
-		return nil, &provider.Error{Kind: provider.InvalidState}
+		return nil, &provider.Error{Kind: provider.InvalidState, Diagnostic: provider.InvalidResponse}
 	}
 	return provider.ReadJSONDocument(refs, out.GetPayload().GetData())
 }

@@ -24,9 +24,50 @@ const (
 	Other                ErrorKind = "Other"
 )
 
+// Diagnostic is a closed set of safe, provider-neutral explanations for
+// operational read failures. Adapters must never construct diagnostics from
+// SDK text or reference data; the engine renders only these fixed messages.
+type Diagnostic uint8
+
+const (
+	NoDiagnostic Diagnostic = iota
+	SecretNotFound
+	BindingNotFound
+	AmbiguousContainer
+	AmbiguousSection
+	AmbiguousField
+	AmbiguousFile
+	SectionNotFound
+	FieldNotFound
+	FileNotFound
+	MalformedContainer
+	UnsupportedContent
+	InvalidResponse
+	diagnosticCount
+)
+
+func (d Diagnostic) Message() string {
+	messages := map[Diagnostic]string{
+		SecretNotFound:     "source secret not found in provider",
+		BindingNotFound:    "source field not found in provider container",
+		AmbiguousContainer: "source container is ambiguous in provider",
+		AmbiguousSection:   "source section is ambiguous in provider container",
+		AmbiguousField:     "source field is ambiguous in provider container",
+		AmbiguousFile:      "source file is ambiguous in provider container",
+		SectionNotFound:    "source section not found in provider container",
+		FieldNotFound:      "source field not found in provider container",
+		FileNotFound:       "source file not found in provider container",
+		MalformedContainer: "provider container contents are malformed",
+		UnsupportedContent: "provider item or content type is unsupported",
+		InvalidResponse:    "provider returned an incomplete or invalid response",
+	}
+	return messages[d]
+}
+
 type Error struct {
-	Kind   ErrorKind
-	Detail string
+	Kind       ErrorKind
+	Diagnostic Diagnostic
+	Detail     string
 }
 
 func (e *Error) Error() string {
@@ -78,20 +119,38 @@ type Receipt struct{ Completed []string }
 // ReadResult distinguishes an absent binding from a present empty value.
 // Adapters must return one result for every requested binding.
 type ReadResult struct {
-	Value secret.Value
-	Found bool
+	Value      secret.Value
+	Found      bool
+	Diagnostic Diagnostic
 }
 
 func (r ReadResult) Reveal() string      { return r.Value.Reveal() }
 func (r ReadResult) Clone() secret.Value { return r.Value.Clone() }
 
 func MissingResults(refs []Reference) map[string]ReadResult {
+	return MissingResultsWithDiagnostic(refs, NoDiagnostic)
+}
+
+func MissingResultsWithDiagnostic(refs []Reference, diagnostic Diagnostic) map[string]ReadResult {
 	results := make(map[string]ReadResult, len(refs))
 	for _, ref := range refs {
-		results[ref.Binding()] = ReadResult{}
+		results[ref.Binding()] = ReadResult{Diagnostic: diagnostic}
 	}
 	return results
 }
+
+// ReadError identifies which entry in a ReadMany request produced a
+// reference-specific failure. It intentionally retains only the slice index,
+// never the provider reference itself.
+type ReadError struct {
+	Index int
+	Err   error
+}
+
+func (e *ReadError) Error() string { return "provider read failed" }
+func (e *ReadError) Unwrap() error { return e.Err }
+
+func ReadFailure(index int, err error) error { return &ReadError{Index: index, Err: err} }
 
 func DestroyReadResults(results map[string]ReadResult) {
 	for key, result := range results {

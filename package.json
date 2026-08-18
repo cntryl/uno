@@ -1,6 +1,6 @@
 {
   "name": "@cntryl/uno",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Copy existing secrets between explicit provider references",
   "license": "Apache-2.0",
   "repository": {

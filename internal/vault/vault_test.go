@@ -90,16 +90,23 @@ func TestShouldReadEveryKeyFromOneSharedDocumentGivenMultipleReferences(t *testi
 	}
 }
 
-func TestShouldFailReadGivenMissingKeyOrNonStringValue(t *testing.T) {
+func TestShouldClassifyMissingKeyAndNonStringValue(t *testing.T) {
 	fake := &fakeVaultAPI{get: func(context.Context, string) (*vaultapi.KVSecret, error) {
 		return &vaultapi.KVSecret{Data: map[string]interface{}{"a": "one", "c": 5}}, nil
 	}}
 	v := &Vault{Mount: mounting(fake)}
-	for _, key := range []string{"c"} {
-		ref := provider.Reference{Scheme: "vault", Region: "secret", Container: "app", Key: key}
-		if _, err := v.ReadMany(context.Background(), []provider.Reference{ref}); err == nil {
-			t.Fatalf("key=%s: expected error", key)
-		}
+	missingRef := provider.Reference{Scheme: "vault", Region: "secret", Container: "app", Key: "missing"}
+	values, err := v.ReadMany(context.Background(), []provider.Reference{missingRef})
+	if err != nil || values[missingRef.Binding()].Found || values[missingRef.Binding()].Diagnostic != provider.BindingNotFound {
+		t.Fatalf("missing=%v err=%v", values, err)
+	}
+
+	unsupportedRef := provider.Reference{Scheme: "vault", Region: "secret", Container: "app", Key: "c"}
+	_, err = v.ReadMany(context.Background(), []provider.Reference{unsupportedRef})
+	var indexed *provider.ReadError
+	var typed *provider.Error
+	if !errors.As(err, &indexed) || indexed.Index != 0 || !errors.As(err, &typed) || typed.Kind != provider.InvalidState || typed.Diagnostic != provider.UnsupportedContent {
+		t.Fatalf("unsupported err=%v", err)
 	}
 }
 
@@ -109,9 +116,28 @@ func TestShouldFailReadGivenSecretNotFound(t *testing.T) {
 	}}
 	v := &Vault{Mount: mounting(fake)}
 	ref := provider.Reference{Scheme: "vault", Region: "secret", Container: "app", Key: "a"}
-	_, err := v.ReadMany(context.Background(), []provider.Reference{ref})
+	values, err := v.ReadMany(context.Background(), []provider.Reference{ref})
+	if err != nil || values[ref.Binding()].Found || values[ref.Binding()].Diagnostic != provider.SecretNotFound {
+		t.Fatalf("values=%v err=%v", values, err)
+	}
+}
+
+func TestShouldClassifyNilVaultResponseAsIncomplete(t *testing.T) {
+	fake := &fakeVaultAPI{get: func(context.Context, string) (*vaultapi.KVSecret, error) { return nil, nil }}
+	ref := provider.Reference{Scheme: "vault", Region: "secret", Container: "app", Key: "a"}
+	_, err := (&Vault{Mount: mounting(fake)}).ReadMany(context.Background(), []provider.Reference{ref})
 	var typed *provider.Error
-	if !errors.As(err, &typed) || typed.Kind != provider.InvalidBinding {
+	if !errors.As(err, &typed) || typed.Kind != provider.InvalidState || typed.Diagnostic != provider.InvalidResponse {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestShouldClassifyNilVaultDataAsMalformedContainer(t *testing.T) {
+	fake := &fakeVaultAPI{get: func(context.Context, string) (*vaultapi.KVSecret, error) { return &vaultapi.KVSecret{}, nil }}
+	ref := provider.Reference{Scheme: "vault", Region: "secret", Container: "app", Key: "a"}
+	_, err := (&Vault{Mount: mounting(fake)}).ReadMany(context.Background(), []provider.Reference{ref})
+	var typed *provider.Error
+	if !errors.As(err, &typed) || typed.Kind != provider.InvalidState || typed.Diagnostic != provider.MalformedContainer {
 		t.Fatalf("err=%v", err)
 	}
 }

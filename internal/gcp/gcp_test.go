@@ -102,7 +102,7 @@ func TestShouldFailReadGivenSecretNotFound(t *testing.T) {
 	s := &SecretManager{C: fake}
 	ref := provider.Reference{Region: "p", Container: "s", Key: "a"}
 	values, err := s.ReadMany(context.Background(), []provider.Reference{ref})
-	if err != nil || values[ref.Binding()].Found {
+	if err != nil || values[ref.Binding()].Found || values[ref.Binding()].Diagnostic != provider.SecretNotFound {
 		t.Fatalf("values=%v err=%v", values, err)
 	}
 }
@@ -193,6 +193,11 @@ func TestShouldRejectNilSDKResponses(t *testing.T) {
 	ref := provider.Reference{Region: "p", Container: "s"}
 	if _, err := (&SecretManager{C: readFake}).ReadMany(context.Background(), []provider.Reference{ref}); err == nil {
 		t.Fatal("expected nil read response to fail")
+	} else {
+		var typed *provider.Error
+		if !errors.As(err, &typed) || typed.Kind != provider.InvalidState || typed.Diagnostic != provider.InvalidResponse {
+			t.Fatalf("read err=%v", err)
+		}
 	}
 	if _, err := (&SecretManager{C: writeFake}).WriteMany(context.Background(), []provider.Write{{Environment: "A", Reference: ref, Value: secret.New("value")}}); err == nil {
 		t.Fatal("expected nil write response to fail")
