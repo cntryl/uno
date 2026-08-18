@@ -9,6 +9,23 @@ const packageJson = JSON.parse(
 ) as Record<string, unknown>;
 
 describe('package metadata', () => {
+  test('should support the npm launcher on Node.js 22 or later', () => {
+    expect(packageJson.engines).toEqual({ node: '>=22.0.0' });
+
+    const readme = readFileSync(path.join(repositoryRoot, 'README.md'), 'utf8');
+    expect(readme).toContain('requires Node.js 22 or later');
+
+    const developmentVersion = readFileSync(
+      path.join(repositoryRoot, '.node-version'),
+      'utf8',
+    ).trim();
+    expect(developmentVersion).toBe('22.22.2');
+    for (const workflow of ['ci.yml', 'publish.yml']) {
+      const source = readFileSync(path.join(repositoryRoot, '.github/workflows', workflow), 'utf8');
+      expect(source).toContain(`node-version: '${developmentVersion}'`);
+    }
+  });
+
   test('should publish a single built launcher with no lifecycle scripts given the root package.json fields', () => {
     expect(packageJson.name).toBe('@cntryl/uno');
     expect(packageJson.private).toBeUndefined();

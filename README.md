@@ -7,7 +7,7 @@ native binaries through npm. It never generates secrets and never invokes the
 
 ## Runtime support
 
-The npm launcher requires Node.js 24.11 or later and bundles binaries for macOS
+The npm launcher requires Node.js 22 or later and bundles binaries for macOS
 13.5 or later, Windows 10 or later, and Linux on ARM64 or x64. Linux packages
 include separate glibc 2.28 and static musl-compatible binaries; the launcher
 selects the matching libc variant without downloading anything at runtime.
