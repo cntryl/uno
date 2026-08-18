@@ -23,6 +23,9 @@ describe('package metadata', () => {
     for (const workflow of ['ci.yml', 'publish.yml']) {
       const source = readFileSync(path.join(repositoryRoot, '.github/workflows', workflow), 'utf8');
       expect(source).toContain(`node-version: '${developmentVersion}'`);
+      expect(source).toContain('npm install --prefix "$NPM_PREFIX" npm@12.0.2');
+      expect(source).toContain('echo "$NPM_PREFIX/node_modules/.bin" >> "$GITHUB_PATH"');
+      expect(source).not.toContain('npm install --global npm@12.0.2');
     }
   });
 
