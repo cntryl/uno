@@ -32,8 +32,8 @@
     "prepack": "vp pack"
   },
   "devDependencies": {
-    "@types/node": "26.2.0",
-    "vite-plus": "0.2.9"
+    "@types/node": "26.4.0",
+    "vite-plus": "0.3.0"
   },
   "devEngines": {
     "packageManager": {
