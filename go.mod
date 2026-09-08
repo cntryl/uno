@@ -18,7 +18,7 @@ require (
 	github.com/googleapis/gax-go/v2 v2.23.0
 	github.com/hashicorp/vault/api v1.23.0
 	golang.org/x/sys v0.47.0
-	google.golang.org/grpc v1.83.0
+	google.golang.org/grpc v1.83.2
 )
 
 require (
