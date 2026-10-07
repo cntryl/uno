@@ -32,7 +32,7 @@
     "prepack": "vp pack"
   },
   "devDependencies": {
-    "@types/node": "26.2.0",
+    "@types/node": "26.6.4",
     "vite-plus": "1.0.0"
   },
   "devEngines": {
