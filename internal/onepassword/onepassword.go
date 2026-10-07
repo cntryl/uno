@@ -28,21 +28,44 @@ type LookupAPI interface {
 type MutationAPI interface {
 	PutItem(context.Context, op.Item) (op.Item, error)
 }
-type sdkAPI struct{ c *op.Client }
+
+// The desktop SDK shares a native IPC core across clients. Serialize its calls
+// and initialization, including the SDK's automatic session renewal. See
+// https://github.com/1Password/onepassword-sdk-go/issues/290.
+var desktopSDKMu sync.Mutex //nolint:gochecknoglobals // The native SDK core is process-wide.
+
+type sdkAPI struct {
+	c  *op.Client
+	mu *sync.Mutex
+}
+
+func sdkCall[T any](ctx context.Context, mu *sync.Mutex, call func() (T, error)) (T, error) {
+	if mu != nil {
+		mu.Lock()
+		defer mu.Unlock()
+	}
+	if err := ctx.Err(); err != nil {
+		var zero T
+		return zero, err
+	}
+	return call()
+}
 
 func (s sdkAPI) ListVaults(c context.Context) ([]op.VaultOverview, error) {
-	return s.c.Vaults().List(c)
+	return sdkCall(c, s.mu, func() ([]op.VaultOverview, error) { return s.c.Vaults().List(c) })
 }
 func (s sdkAPI) ListItems(c context.Context, v string) ([]op.ItemOverview, error) {
-	return s.c.Items().List(c, v)
+	return sdkCall(c, s.mu, func() ([]op.ItemOverview, error) { return s.c.Items().List(c, v) })
 }
 func (s sdkAPI) GetItem(c context.Context, v, i string) (op.Item, error) {
-	return s.c.Items().Get(c, v, i)
+	return sdkCall(c, s.mu, func() (op.Item, error) { return s.c.Items().Get(c, v, i) })
 }
 func (s sdkAPI) ReadFile(c context.Context, vault, item string, attributes op.FileAttributes) ([]byte, error) {
-	return s.c.Items().Files().Read(c, vault, item, attributes)
+	return sdkCall(c, s.mu, func() ([]byte, error) { return s.c.Items().Files().Read(c, vault, item, attributes) })
 }
-func (s sdkAPI) PutItem(c context.Context, i op.Item) (op.Item, error) { return s.c.Items().Put(c, i) }
+func (s sdkAPI) PutItem(c context.Context, i op.Item) (op.Item, error) {
+	return sdkCall(c, s.mu, func() (op.Item, error) { return s.c.Items().Put(c, i) })
+}
 
 const (
 	notesSelector      = "?notes"
