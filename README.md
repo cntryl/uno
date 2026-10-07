@@ -224,7 +224,11 @@ concealed and destination items must be Secure Notes. Vaults, items, sections,
 and fields resolve by exact title or ID; ambiguity fails. Set
 `OP_SERVICE_ACCOUNT_TOKEN` in CI or set `OP_ACCOUNT` to the desktop app's
 account display name or account UUID (not its sign-in URL). The service-account
-token takes precedence.
+token takes precedence. Desktop SDK requests run serially so concurrent
+item reads cannot race authorization or session renewal. A separate uno
+command still requires its own approval: 1Password authorizes each process
+individually, and authorization expires when the account locks or after ten
+minutes of inactivity. See [1Password's authorization model](https://www.1password.dev/sdks/desktop-app-integrations).
 
 The source-only `?notes` selector reads the notes text from any item category.
 The source-only `?document` selector reads a Document item's contents. The

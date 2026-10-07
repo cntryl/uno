@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"strings"
+	"sync"
 
 	op "github.com/1password/onepassword-sdk-go"
 	"github.com/cntryl/uno/internal/core/provider"
@@ -75,17 +76,28 @@ func parseFileSelector(selector string) (string, error) {
 func invalidReference(message string) error { _, err := provider.InvalidParse(message); return err }
 
 func New(ctx context.Context) (*Adapter, error) {
-	options, err := clientOptions(os.Getenv("OP_SERVICE_ACCOUNT_TOKEN"), os.Getenv("OP_ACCOUNT"))
+	api, err := newSDKAPI(ctx, os.Getenv("OP_SERVICE_ACCOUNT_TOKEN"), os.Getenv("OP_ACCOUNT"), op.NewClient)
 	if err != nil {
 		return nil, err
 	}
-	options = append(options, op.WithIntegrationInfo("uno", version.Current))
-	client, err := op.NewClient(ctx, options...)
-	if err != nil {
-		return nil, &provider.Error{Kind: provider.Authentication}
-	}
-	api := sdkAPI{client}
 	return &Adapter{lookup: api, mutation: api}, nil
+}
+
+func newSDKAPI(ctx context.Context, token, account string, build func(context.Context, ...op.ClientOption) (*op.Client, error)) (sdkAPI, error) {
+	options, err := clientOptions(token, account)
+	if err != nil {
+		return sdkAPI{}, err
+	}
+	options = append(options, op.WithIntegrationInfo("uno", version.Current))
+	var mu *sync.Mutex
+	if token == "" {
+		mu = &desktopSDKMu
+	}
+	client, err := sdkCall(ctx, mu, func() (*op.Client, error) { return build(ctx, options...) })
+	if err != nil {
+		return sdkAPI{}, &provider.Error{Kind: provider.Authentication}
+	}
+	return sdkAPI{c: client, mu: mu}, nil
 }
 
 func clientOptions(token, account string) ([]op.ClientOption, error) {

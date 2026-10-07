@@ -31,6 +31,8 @@ linters:
     - wsl_v5
 
   exclusions:
+    paths:
+      - node_modules
     rules:
       # `run` intentionally executes the exact argv supplied by the user.
       - path: internal/cli/cli.go

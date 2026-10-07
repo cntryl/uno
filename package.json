@@ -1,6 +1,6 @@
 {
   "name": "@cntryl/uno",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Copy existing secrets between explicit provider references",
   "license": "Apache-2.0",
   "repository": {
@@ -33,7 +33,7 @@
   },
   "devDependencies": {
     "@types/node": "26.2.0",
-    "vite-plus": "0.2.9"
+    "vite-plus": "1.0.0"
   },
   "devEngines": {
     "packageManager": {
