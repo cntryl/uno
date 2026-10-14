@@ -43,7 +43,7 @@ jobs:
           "./$binary" --version
 
       - name: Upload Windows binary
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: native-${{ matrix.target }}
           path: native/${{ matrix.target }}/uno.exe
