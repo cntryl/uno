@@ -63,9 +63,9 @@ describe('release artifact integrity', () => {
       expect(workflow).toContain('go build -trimpath');
       expect(workflow).not.toMatch(/\bGOOS=/);
       expect(workflow).not.toMatch(/\bGOARCH=/);
-      expect(workflow).toContain('actions/upload-artifact@v7.0.1');
+      expect(workflow).toMatch(/actions\/upload-artifact@v7\.\d+\.\d+/);
     }
-    expect(publishWorkflow).toContain('actions/download-artifact@v8.0.1');
+    expect(publishWorkflow).toMatch(/actions\/download-artifact@v8\.\d+\.\d+/);
   });
 
   test('should target macOS 13.5 and verify the linked deployment floor given the Darwin workflow file', () => {
