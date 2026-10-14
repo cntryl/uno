@@ -70,14 +70,14 @@ jobs:
           fi
 
       - name: Upload glibc binary
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: native-linux-${{ matrix.arch }}-glibc
           path: native/linux-${{ matrix.arch }}-glibc/uno
           if-no-files-found: error
 
       - name: Upload musl binary
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: native-linux-${{ matrix.arch }}-musl
           path: native/linux-${{ matrix.arch }}-musl/uno
