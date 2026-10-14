@@ -182,6 +182,18 @@ type Factory interface {
 }
 type capabilityFactory interface{ CapabilityPrefixes() []string }
 
+// DestinationValidator is an optional factory capability for providers whose
+// source references include selectors that cannot be written as destinations.
+type DestinationValidator interface {
+	ValidateDestination(Reference) error
+}
+
+// RollbackCapability lets a factory report unsupported rollback without
+// constructing an adapter, which may require provider credentials.
+type RollbackCapability interface {
+	SupportsRollback(Reference) bool
+}
+
 // Rollbacker is an optional adapter capability. An adapter that can revert a
 // container to its previous value implements it; callers must type-assert
 // since not every provider (or every reference kind) supports this — an
@@ -229,6 +241,31 @@ func (r *Registry) Adapter(ctx context.Context, ref Reference) (Adapter, error) 
 		return nil, &Error{Kind: InvalidBinding}
 	}
 	return f.Adapter(ctx, ref)
+}
+
+// ValidateDestination delegates destination-specific validation to the
+// registered provider factory when it declares that capability.
+func (r *Registry) ValidateDestination(ref Reference) error {
+	f := r.factories[ref.Scheme]
+	if f == nil {
+		return &Error{Kind: InvalidBinding}
+	}
+	if validator, ok := f.(DestinationValidator); ok {
+		return validator.ValidateDestination(ref)
+	}
+	return nil
+}
+
+// RollbackSupport returns the declared capability and whether the factory
+// declared one. An unknown capability still needs adapter construction and
+// the usual Rollbacker type assertion.
+func (r *Registry) RollbackSupport(ref Reference) (bool, bool) {
+	f := r.factories[ref.Scheme]
+	capability, ok := f.(RollbackCapability)
+	if !ok {
+		return false, false
+	}
+	return capability.SupportsRollback(ref), true
 }
 
 func ValidateDestinations(refs []Reference) error {
