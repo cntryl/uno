@@ -303,7 +303,8 @@ func (f *fakeSecrets) GetSecretValue(context.Context, *sm.GetSecretValueInput, .
 		return nil, nil
 	}
 	if f.binary != nil {
-		return &sm.GetSecretValueOutput{SecretBinary: f.binary}, nil
+		version := "current"
+		return &sm.GetSecretValueOutput{SecretBinary: f.binary, VersionId: &version}, nil
 	}
 	if f.value == nil {
 		return nil, &smtypes.ResourceNotFoundException{}
@@ -329,6 +330,21 @@ func TestShouldClassifySecretsManagerReadDiagnostics(t *testing.T) {
 	assertProviderError(t, err, provider.InvalidState, provider.UnsupportedContent)
 	if strings.Contains(err.Error(), "CANARY") {
 		t.Fatalf("binary err=%v", err)
+	}
+}
+
+func TestShouldRejectBinarySecretBeforeKeyedWrite(t *testing.T) {
+	fake := &fakeSecrets{binary: []byte("CANARY_BINARY")}
+	write := provider.Write{
+		Environment: "MY_API_KEY",
+		Reference:   provider.Reference{Container: "secret", Key: "MY_API_KEY"},
+		Value:       secret.New("replacement"),
+	}
+
+	_, err := (&Secrets{C: fake}).WriteMany(context.Background(), []provider.Write{write})
+	assertProviderError(t, err, provider.InvalidState, provider.UnsupportedContent)
+	if fake.puts != 0 || fake.creates != 0 {
+		t.Fatalf("binary secret was written: puts=%d creates=%d", fake.puts, fake.creates)
 	}
 }
 

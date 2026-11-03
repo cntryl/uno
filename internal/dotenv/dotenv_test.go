@@ -62,3 +62,12 @@ func TestShouldReturnErrorWithoutLeakingValueGivenNULByte(t *testing.T) {
 		t.Fatalf("unsafe error: %v", err)
 	}
 }
+
+func TestShouldNotLeakKeyOrValueGivenNULByte(t *testing.T) {
+	key := "CANARY_ENV_KEY"
+	value := "CANARY_SECRET_VALUE\x00suffix"
+	err := Write(filepath.Join(t.TempDir(), ".env.secrets"), map[string]secret.Value{key: secret.New(value)})
+	if err == nil || strings.Contains(err.Error(), key) || strings.Contains(err.Error(), value) || strings.Contains(err.Error(), "CANARY_SECRET_VALUE") {
+		t.Fatalf("unsafe error: %v", err)
+	}
+}

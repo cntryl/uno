@@ -106,14 +106,20 @@ func (s *Secrets) initializeExistingSecret(ctx context.Context, secretID, payloa
 }
 
 func (s *Secrets) mergeStageAndPromote(ctx context.Context, secretID string, currentSecret *sm.GetSecretValueOutput, writes []provider.Write) writeAttemptResult {
+	if currentSecret == nil {
+		return failedWrite(&provider.Error{Kind: provider.InvalidState, Diagnostic: provider.InvalidResponse})
+	}
+	if currentSecret.SecretBinary != nil {
+		return failedWrite(&provider.Error{Kind: provider.InvalidState, Diagnostic: provider.UnsupportedContent})
+	}
+	if currentSecret.SecretString == nil {
+		return failedWrite(&provider.Error{Kind: provider.InvalidState, Diagnostic: provider.InvalidResponse})
+	}
 	if currentSecret.VersionId == nil {
 		return failedWrite(&provider.Error{Kind: provider.InvalidState})
 	}
 
-	var currentPayload []byte
-	if currentSecret.SecretString != nil {
-		currentPayload = []byte(*currentSecret.SecretString)
-	}
+	currentPayload := []byte(*currentSecret.SecretString)
 	mergedPayload, err := provider.MergeJSONDocument(currentPayload, writes)
 	if err != nil {
 		return failedWrite(err)

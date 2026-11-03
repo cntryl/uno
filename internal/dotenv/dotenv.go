@@ -42,7 +42,7 @@ func writeTemporary(file *os.File, path string, values map[string]secret.Value) 
 	for _, key := range secret.SortedKeys(values) {
 		encoded, err := encode(values[key].Reveal())
 		if err != nil {
-			return closeWith(file, "could not encode secret "+key)
+			return closeWith(file, "could not encode secret value")
 		}
 		if _, err := fmt.Fprintf(file, "%s=%s\n", key, encoded); err != nil {
 			return closeWith(file, "could not write temporary secrets file")
