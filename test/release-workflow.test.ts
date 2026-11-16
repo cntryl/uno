@@ -97,7 +97,7 @@ describe('release artifact integrity', () => {
   });
 
   test('should sign every native binary and generate a cyclonedx sbom given the release workflow file', () => {
-    expect(publishWorkflow).toContain('sigstore/cosign-installer@v4.1.2');
+    expect(publishWorkflow).toContain('sigstore/cosign-installer@v4.1.3');
     expect(publishWorkflow).toContain('cyclonedx-gomod@v1.10.0');
     expect(publishWorkflow).toContain('cosign sign-blob --yes --bundle');
     expect(publishWorkflow).toContain(
