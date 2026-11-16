@@ -15,6 +15,7 @@ import (
 
 	"github.com/cntryl/uno/internal/core/provider"
 	"github.com/cntryl/uno/internal/core/secret"
+	"github.com/cntryl/uno/internal/onepassword"
 )
 
 // run executes one CLI invocation against an in-memory stdout buffer and a
@@ -387,6 +388,41 @@ func TestShouldReportUnsupportedGivenProviderLacksRollback(t *testing.T) {
 	}
 	if output != "VALUE: unsupported\n" {
 		t.Fatalf("output=%q", output)
+	}
+}
+
+func TestShouldReportOnePasswordRollbackUnsupportedWithoutCredentials(t *testing.T) {
+	t.Setenv("OP_SERVICE_ACCOUNT_TOKEN", "")
+	t.Setenv("OP_ACCOUNT", "")
+	path := filepath.Join(t.TempDir(), "template")
+	if err := os.WriteFile(path, []byte("MY_API_KEY=op://Vault/Item/MY_API_KEY -> op://Vault/Item/MY_API_KEY\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	registry := provider.NewRegistry()
+	registry.Register("op", onepassword.Factory{})
+
+	code, output, err := run([]string{"--template", path, "rollback", "--force"}, registry)
+	if err == nil || code != 1 || output != "MY_API_KEY: unsupported\n" {
+		t.Fatalf("code=%d output=%q err=%v", code, output, err)
+	}
+}
+
+func TestShouldRejectOnePasswordSourceOnlyDestinationDuringCheck(t *testing.T) {
+	for _, selector := range []string{"?notes", "?document", "?file=certificate.pem"} {
+		t.Run(selector, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "template")
+			mapping := "MY_API_KEY=op://Vault/Item" + selector + " -> op://Vault/Item" + selector + "\n"
+			if err := os.WriteFile(path, []byte(mapping), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			registry := provider.NewRegistry()
+			registry.Register("op", onepassword.Factory{})
+
+			code, output, err := run([]string{"--template", path, "check"}, registry)
+			if err == nil || code != 1 || output != "" || !strings.Contains(err.Error(), "invalid destination reference") {
+				t.Fatalf("code=%d output=%q err=%v", code, output, err)
+			}
+		})
 	}
 }
 

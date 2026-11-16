@@ -82,6 +82,9 @@ func bind(file *tpl.File, registry *provider.Registry, bindDestinations bool) (*
 		if err != nil {
 			return nil, fmt.Errorf("line %d: invalid destination reference: %s", entry.Line, provider.BindingDetail(err))
 		}
+		if err := registry.ValidateDestination(destination); err != nil {
+			return nil, fmt.Errorf("line %d: invalid destination reference: %s", entry.Line, provider.BindingDetail(err))
+		}
 		p.Mappings = append(p.Mappings, Mapping{Environment: entry.Key, Source: source, Destination: destination, Line: entry.Line})
 		destinations = append(destinations, destination)
 	}
@@ -391,6 +394,10 @@ func Rollback(ctx context.Context, p *Plan) ([]RollbackResult, error) {
 		environments := make([]string, len(group.mappings))
 		for j, m := range group.mappings {
 			environments[j] = m.Environment
+		}
+		if supported, known := p.Registry.RollbackSupport(group.reference); known && !supported {
+			results[i] = rollbackStatusForAll(environments, Unsupported, "")
+			return
 		}
 		adapter, err := adapters.get(ctx, group.reference)
 		if err != nil {
