@@ -6,6 +6,7 @@ linters:
     # The project intentionally uses ordinary errors and compact internal APIs.
     - err113
     - exhaustruct
+    - exhaustruct_v5
     - ireturn
     - noinlineerr
     - varnamelen
