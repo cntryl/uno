@@ -15,6 +15,15 @@ type Factory struct{}
 
 func (Factory) CapabilityPrefixes() []string { return []string{"OP_"} }
 
+func (Factory) SupportsRollback(provider.Reference) bool { return false }
+
+func (Factory) ValidateDestination(ref provider.Reference) error {
+	if sourceOnly(ref) {
+		return &provider.Error{Kind: provider.InvalidBinding}
+	}
+	return nil
+}
+
 func (Factory) Parse(raw string) (provider.Reference, error) { return Parse(raw) }
 
 func (Factory) Adapter(ctx context.Context, _ provider.Reference) (provider.Adapter, error) {
