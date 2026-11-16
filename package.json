@@ -32,13 +32,13 @@
     "prepack": "vp pack"
   },
   "devDependencies": {
-    "@types/node": "26.6.5",
-    "vite-plus": "1.4.0"
+    "@types/node": "26.6.6",
+    "vite-plus": "1.6.0"
   },
   "devEngines": {
     "packageManager": {
       "name": "npm",
-      "version": "12.0.2",
+      "version": "12.2.2",
       "onFail": "download"
     }
   },
